@@ -1,0 +1,82 @@
+
+# ----------------------------------------
+# OS Files
+# ----------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.Trash-*
+
+# ----------------------------------------
+# Editors / IDEs
+# ----------------------------------------
+# VS Code
+.vscode/
+.vscode-test/
+*.code-workspace
+
+# JetBrains
+.idea/
+*.iml
+
+# ----------------------------------------
+# Logs and databases
+# ----------------------------------------
+logs/
+*.log
+*.sql
+*.sqlite
+
+# ----------------------------------------
+# Dependencies
+# ----------------------------------------
+node_modules/
+vendor/
+packages/
+
+# ----------------------------------------
+# Environment & sensitive files
+# ----------------------------------------
+.env
+.env.*
+*.key
+*.pem
+
+# ----------------------------------------
+# Build outputs
+# ----------------------------------------
+dist/
+build/
+out/
+target/
+bin/
+obj/
+
+# ----------------------------------------
+# Caches
+# ----------------------------------------
+.cache/
+*.cache
+__pycache__/
+*.pyc
+
+# ----------------------------------------
+# Temporary files
+# ----------------------------------------
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*.bak

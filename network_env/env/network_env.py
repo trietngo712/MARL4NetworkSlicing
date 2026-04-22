@@ -7,6 +7,14 @@ import torch
 from gymnasium.spaces import Box, Dict
 from pettingzoo import ParallelEnv
 from torchrl.envs.libs.pettingzoo import PettingZooWrapper
+from collections import defaultdict
+
+mec2links = {
+    1: [0, 1, 2, 3],
+    2: [0, 4, 5, 6],
+    3: [1, 4, 7, 8],
+    4: [2, 5, 7, 9],
+    5: [3, 6, 8, 9]}
 
 class NetworkEnv(ParallelEnv):
     metadata = {"name": "network_env_v0"}
@@ -31,7 +39,7 @@ class NetworkEnv(ParallelEnv):
         self.checker_dict = {}
         self.window = 5
         self.recent_latencies = deque(maxlen = self.window)
-        self.receent_energies = deque(maxlen = self.window)
+        self.recent_energies = deque(maxlen = self.window)
     
     def _read_config(self, config_path):
         
@@ -46,7 +54,7 @@ class NetworkEnv(ParallelEnv):
         
         #self.num_agents = len(config['agent']['id'])
         agent_ids = config['agent']['id']
-        self.agents = [f"{i}" for i in agent_ids]
+        self.agents = [f"agent_{i}" for i in agent_ids]
         self.possible_agents = self.agents[:]
         
         self.sim_workload = config['workload']
@@ -87,8 +95,8 @@ class NetworkEnv(ParallelEnv):
         self.all_prefs = np.concatenate([list(self.latency_pref.values()), list(self.energy_pref.values())])
         
         # For reward calculation and state tracking
-        #self.allocated_cpu = {agent: np.zeros(self.num_mecs, dtype=np.float32) for agent in self.agents}
-        #self.allocated_bandwidth = {agent: np.zeros(self.num_links, dtype=np.float32) for agent in self.agents}
+        self.allocated_cpu = {agent : {} for agent in self.agents}
+        self.allocated_bandwidth = {agent : {} for agent in self.agents}
 
         obs = {a: np.concatenate([self.r_cpu / self.cpu_capacity, self.r_bandwidth / self.bw_capacity, (self.cpu_req[a] - self.sim_cpu_demand['min']) / (self.sim_cpu_demand['max'] - self.sim_cpu_demand['min']), (self.workload_size[a] - self.sim_workload['min']) / (self.sim_workload['max'] - self.sim_workload['min']), [self.latency_pref[a], self.energy_pref[a]]])  for a in self.agents}
         infos = {a: {} for a in self.agents}
@@ -102,7 +110,7 @@ class NetworkEnv(ParallelEnv):
         
         #TODO: Add logic to handle invalid actions (e.g., requesting more resources than available) and calculate penalties if needed
         
-        checker = Checker(self.agents, num_mecs=self.num_mecs)
+        checker = Checker(agents=self.agents, num_mecs=self.num_mecs, time_step=self.time_step)
         
         
         # Convert items to a list so they can be shuffled
@@ -125,17 +133,22 @@ class NetworkEnv(ParallelEnv):
                 if allocated_cpu[i] > self.r_cpu[i]:
                     allocated_cpu[i] = max(0,self.r_cpu[i] / self.cpu_capacity[i] - 0.05) * self.cpu_capacity[i]  # Cap allocation to available resources
                 else:
-                    allocated_cpu[i] = min(allocated_cpu[i] / self.cpu_capacity[i], 1 - 0.05) * self.cpu_capacity[i]  # Ensure allocation does not exceed available resources
+                    allocated_cpu[i] = min(allocated_cpu[i], self.r_cpu[i] / self.cpu_capacity[i] - 0.05) * self.cpu_capacity[i]  # Ensure allocation does not exceed available resources
                     
                 self.r_cpu[i] -= allocated_cpu[i]
+                #self.allocated_cpu[agent_id].setdefault(self.time_step, []).append(allocated_cpu[i])
+            
             
             for j in range(self.num_links):
                 if allocated_bandwidth[j] > self.r_bandwidth[j]:
                     allocated_bandwidth[j] = max(0,self.r_bandwidth[j] / self.bw_capacity[j] - 0.05) * self.bw_capacity[j]  # Cap allocation to available resources
                 else:
-                    allocated_bandwidth[j] = min(allocated_bandwidth[j] / self.bw_capacity[j], 1 - 0.05) * self.bw_capacity[j]  # Ensure allocation does not exceed available resources
+                    allocated_bandwidth[j] = min(allocated_bandwidth[j], self.r_bandwidth[j] / self.bw_capacity[j] - 0.05) * self.bw_capacity[j]  # Ensure allocation does not exceed available resources
                 
                 self.r_bandwidth[j] -= allocated_bandwidth[j]
+                #self.allocated_bandwidth[agent_id].setdefault(self.time_step, []).append(allocated_bandwidth[j])
+            
+            checker.set_allocations(agent_id, allocated_cpu, allocated_bandwidth)
             
             # Calculate latency of each slice
             
@@ -163,18 +176,21 @@ class NetworkEnv(ParallelEnv):
         
         self.checker_dict[self.time_step] = checker
         
-        for i in range(1, self.time_step):
-            if self.checker_dict[i].update(self.agents, self.num_mecs, energy):
+        #print(self.allocated_cpu)
+        
+        for i in self.checker_dict.keys():
+            if self.checker_dict[i].update(self.agents, self.num_mecs, energy, r_cpu=self.r_cpu, r_bandwidth=self.r_bandwidth, allocated_cpu=self.allocated_cpu, allocated_bandwidth=self.allocated_bandwidth):
                 
                 some_reward_arrived = True
                 
+                
                 self.recent_latencies.append(self.checker_dict[i].get_latency())
-                self.receent_energies.append(self.checker_dict[i].get_energy())
+                self.recent_energies.append(self.checker_dict[i].get_energy())
                 
                 if len(self.recent_latencies) < self.window:
                     global_reward[i] = self.checker_dict[i].get_reward(min_latency=1, min_energy=1, latency_weight=self.latency_pref, energy_weight=self.energy_pref)
                 else:
-                    global_reward[i] = self.checker_dict[i].get_reward(min_latency=np.mean(self.recent_latencies), min_energy=np.mean(self.receent_energies), latency_weight=self.latency_pref, energy_weight=self.energy_pref)
+                    global_reward[i] = self.checker_dict[i].get_reward(min_latency=np.mean(self.recent_latencies), min_energy=np.mean(self.recent_energies), latency_weight=self.latency_pref, energy_weight=self.energy_pref)
                 del self.checker_dict[i]
         
         
@@ -209,11 +225,19 @@ class NetworkEnv(ParallelEnv):
     
     
 class Checker():
-    def __init__(self, agents, num_mecs):
+    def __init__(self, agents, num_mecs, time_step):
         self.energy = {agent: np.zeros(num_mecs, dtype=np.float32) for agent in agents}
         self.counter = {agent: np.zeros(num_mecs, dtype=np.int32) for agent in agents}
         self.global_counter = 0
         self.latency = {agent: 0 for agent in agents}
+        self.time_step = time_step
+        self.allocated_cpu = {agent : {} for agent in agents}
+        self.allocated_bandwidth = {agent : {} for agent in agents}
+        
+        
+    def set_allocations(self, agent, allocated_cpu, allocated_bandwidth):
+        self.allocated_cpu[agent] = allocated_cpu
+        self.allocated_bandwidth[agent] = allocated_bandwidth
         
     def set_counter(self, agents, num_mecs, counter):
         for agent in agents:
@@ -231,13 +255,21 @@ class Checker():
         for agent in agents:
             self.latency[agent] = latency[agent]
     
-    def update(self, agents, num_mecs, energy):
+    def update(self, agents, num_mecs, energy, r_cpu=None, r_bandwidth=None, allocated_cpu=None, allocated_bandwidth=None):
         for agent in agents:
             for j in range(num_mecs):
                 if self.counter[agent][j] > 0:
                     self.energy[agent][j] += energy[agent][j]
                     self.counter[agent][j] -= 1
                     self.global_counter -= 1
+                    
+                    if self.counter[agent][j] == 0:
+                        
+                        r_cpu[j] +=  allocated_cpu[agent][j]
+                        
+                        for link in mec2links[j+1]:
+                            r_bandwidth[link] += allocated_bandwidth[agent][link]
+        
                     
         if self.global_counter == 0:
             return True

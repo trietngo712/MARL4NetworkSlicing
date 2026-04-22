@@ -3,7 +3,7 @@ import random
 import heapq
 import csv
 
-SIM_TIME = 100 # seconds
+SIM_TIME = 1000 # seconds
 
 slices = ["eMBB", "uRLLC", "mMTC"]
 
@@ -41,7 +41,7 @@ def next_arrival(current_time, lam):
 
 
 
-for i in range(1, 11):
+for i in range(1):
     np.random.seed(i)
     random.seed(i)
     

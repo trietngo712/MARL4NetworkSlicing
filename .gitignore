@@ -80,3 +80,6 @@ temp/
 *.swp
 *.swo
 *.bak
+
+
+*.csv

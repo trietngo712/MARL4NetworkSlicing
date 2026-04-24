@@ -1,0 +1,58 @@
+# Initialize logging with a general name
+pbar = tqdm(
+    total=n_iters,
+    desc=", ".join([f"step_reward_{group} = 0" for group in env.group_map.keys()]),
+)
+reward_history_map = {group: [] for group in env.group_map.keys()}
+train_group_map = copy.deepcopy(env.group_map)
+
+for iteration, batch in enumerate(collector):
+    current_frames = batch.numel()
+    batch = process_batch(batch) 
+    
+    for group in train_group_map.keys():
+        # 1. Isolate group data
+        group_batch = batch.exclude(
+            *[key for _group in env.group_map.keys() if _group != group 
+              for key in [_group, ("next", _group)]]
+        )
+        group_batch = group_batch.reshape(-1)
+        replay_buffers[group].extend(group_batch)
+
+        # 2. Optimize
+        for _ in range(n_optimiser_steps):
+            subdata = replay_buffers[group].sample()
+            loss_vals = losses[group](subdata)
+
+            for loss_name in ["loss_actor", "loss_value"]:
+                loss = loss_vals[loss_name]
+                optimiser = optimisers[group][loss_name]
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(optimiser.param_groups[0]["params"], max_grad_norm)
+                optimiser.step()
+                optimiser.zero_grad()
+
+            target_updaters[group].step()
+
+        exploration_policies[group][-1].step(current_frames)
+
+    # 3. Continual Logging (Step-based instead of Episode-based)
+    current_log_status = []
+    for group in env.group_map.keys():
+        # Get the immediate reward from the batch
+        # Using ('next', group, 'reward') because 'episode_reward' won't be ready
+        group_rewards = batch.get(("next", group, "reward"))
+        
+        if group_rewards is not None:
+            mean_reward = group_rewards.mean().item()
+        else:
+            mean_reward = 0.0
+            
+        reward_history_map[group].append(mean_reward)
+        
+        # Keep only the last 10 iterations for a rolling average view
+        rolling_mean = sum(reward_history_map[group][-10:]) / min(len(reward_history_map[group]), 10)
+        current_log_status.append(f"reward_{group} = {rolling_mean:.4f}")
+
+    pbar.set_description(", ".join(current_log_status), refresh=False)
+    pbar.update()

@@ -1,0 +1,108 @@
+[
+    {
+        "id": 0,
+        "type": "mec",
+        "resources": {
+            "cpu": 4
+        }
+    },
+    {
+        "id": 1,
+        "type": "mec",
+        "resources": {
+            "cpu": 4
+        }
+    },
+    {
+        "id": 2,
+        "type": "mec",
+        "resources": {
+            "cpu": 4
+        }
+    },
+    {
+        "id": 3,
+        "type": "mec",
+        "resources": {
+            "cpu": 4
+        }
+    },
+    {
+        "id": 4,
+        "type": "mec",
+        "resources": {
+            "cpu": 4
+        }
+    },
+    {
+        "id": 0,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 1,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 2,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 3,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 4,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 5,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 6,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 7,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 8,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    },
+    {
+        "id": 9,
+        "type": "link",
+        "resources": {
+            "bandwidth": 10
+        }
+    }
+]
+

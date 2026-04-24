@@ -8,300 +8,481 @@ from gymnasium.spaces import Box, Dict
 from pettingzoo import ParallelEnv
 from torchrl.envs.libs.pettingzoo import PettingZooWrapper
 from collections import defaultdict
+import pandas as pd
+import os 
 
-mec2links = {
-    1: [0, 1, 2, 3],
-    2: [0, 4, 5, 6],
-    3: [1, 4, 7, 8],
-    4: [2, 5, 7, 9],
-    5: [3, 6, 8, 9]}
+NUM_AGENTS = 4
+WINDOW = 20
 
 class NetworkEnv(ParallelEnv):
-    metadata = {"name": "network_env_v0"}
-
-    def __init__(self, config_path=None, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, config_path = None):
+        super().__init__()
         
-        self._read_config(config_path)
+        if config_path is None:
+            raise ValueError("Config path must be provided.")
         
-        self.r_cpu = None # Available CPU resources at each MEC server
-        self.r_bandwidth = None # Available bandwidth on each link
-        self.cpu_req = None # CPU demand for each agent
-        self.workload_size = None # Workload size for each agent
-        self.allocated_cpu = None  # Allocated CPU resources for each agent
-        self.allocated_bandwidth = None # Allocated bandwidth for each agent
-        self.all_prefs = None # Concatenated preferences for all agents
-        self.all_cpu_req = None # Total CPU demand across all agents
-        self.all_workload_size = None # Total workload size across all agents
+        self.config_path = config_path
         
-
+                #Reset the environment to an initial state and return the initial observations and infos for all agents.
         self.time_step = 0
-        self.checker_dict = {}
-        self.window = 5
-        self.recent_latencies = deque(maxlen = self.window)
-        self.recent_energies = deque(maxlen = self.window)
-    
-    def _read_config(self, config_path):
         
+        #read config file and create resources and slices
+        self._read_config(self.config_path)
+        
+        self.agents = [f"agent_{i}" for i in range(NUM_AGENTS)]
+        self.possible_agents = self.agents[:]
+        
+        self.slices = {}
+        for agent in self.agents:
+            self.slices[agent] = Slice(id=agent, resources=self.resources)
+        
+        # We use deques to store recent energy consumption and latency for each agent, which will be used to calculate the minimum energy and latency for reward calculation.
+        self.recent_energy = {agent: deque(maxlen=WINDOW) for agent in self.agents}
+        self.recent_latency = {agent: deque(maxlen=WINDOW) for agent in self.agents}
+        
+        self.reward_track = {} #{time_step: {agent: reward}}
+        
+        self.ready_reward = {}
+        self.is_ready_value = False
+
+        
+
+        
+    def say_hello(self):
+        print("Hello from NetworkEnv!")
+    
+    def _is_reward_ready(self, time_step):
+        for _, reward in self.reward_track[time_step].items():
+            if reward is None:
+                return False
+        return True
+
+    def _minimum_latency(self):
+        min_latency = 1
+        condition = np.all([len(self.recent_latency[agent]) >= WINDOW for agent in self.agents])
+        
+        if condition:
+            min_latency = np.mean([np.min(self.recent_latency[agent]) for agent in self.agents])
+        
+        return min_latency
+    
+    def _minimum_energy(self):
+        min_energy = 100
+        condition = np.all([len(self.recent_energy[agent]) >= WINDOW for agent in self.agents])
+        
+        if condition:
+            min_energy = np.mean([np.min(self.recent_energy[agent]) for agent in self.agents])
+        
+        return min_energy
+
+        
+    
+    @functools.lru_cache(maxsize=None)
+    def observation_space(self, agent):
+        number_of_resources = self.slices[agent].number_of_resources()
+        return Box(low=0.0, high=np.inf, shape=(number_of_resources * 2 + 2,), dtype=np.float32)
+    
+    @functools.lru_cache(maxsize=None)
+    def action_space(self, agent):
+        number_of_resources = self.slices[agent].number_of_resources()
+        return Box(low=0.0, high=1.0, shape=(number_of_resources,), dtype=np.float32)
+    
+    def reset(self, seed=None, options=None):
+        print("-----------------RESET-------------------")
+        #Reset the environment to an initial state and return the initial observations and infos for all agents.
+        self.time_step = 0
+        
+        #read config file and create resources and slices
+        self._read_config(self.config_path)
+        
+        self.slices = {}
+        for agent in self.agents:
+            self.slices[agent] = Slice(id=agent, resources=self.resources)
+        
+        # We use deques to store recent energy consumption and latency for each agent, which will be used to calculate the minimum energy and latency for reward calculation.
+        self.recent_energy = {agent: deque(maxlen=WINDOW) for agent in self.agents}
+        self.recent_latency = {agent: deque(maxlen=WINDOW) for agent in self.agents}
+        
+        self.reward_track = {} #{time_step: {agent: reward}}
+
+        
+        self.demand = {}
+        for agent in self.agents:
+            self.demand[agent] = pd.read_csv(os.path.join('traffic', f'{agent}_demand.csv'))
+        
+        self.rejection_counts = {agent: 0 for agent in self.agents}
+        
+        self.ready_reward = {}
+        self.is_ready_value = False
+
+        
+ 
+        obs = self._get_observation(self.time_step)
+        #print("Initial Observation:", obs)
+        infos = {agent: {} for agent in self.agents}
+        
+        return obs, infos
+    
+    def step(self, actions):
+        print(f'-----------------{self.time_step}-------------------')
+        #print(self.reward_track)
+        #print(f"TIME STEP: {self.time_step}")
+        # We process agents in random order to avoid bias towards certain agents.
+        items = list(actions.items())
+        random.shuffle(items)
+        reward = {agent: None for agent in self.agents}
+        self.reward_track[self.time_step] = reward
+        
+        for agent, action in items:
+            #This is the beginning of the time step
+            #1. Get the demand for this time step
+            #2. Create a register for this time 
+            #3. For each resource, check if the demand can be met with the allocated resource. If yes, create a task and add to register. If no, reject the task.
+            
+            slice = self.slices[agent]
+            demand = self.demand[agent].iloc[self.time_step]
+            register = Register(creation_time=self.time_step)
+            
+            for idx, resource_id in enumerate(slice.idx_to_resource):
+                resource_allocation = action[idx] * slice.get_resource_by_index(idx).capacity
+                
+                # We add a safety margin here
+                # If the requested resource allocation exceeds the available resource, 
+                # we adjust it to be slightly less than the available resource to avoid over-allocation.
+                # However, if the available resource is very low (less than 5% of capacity),
+                # we set the allocation to 0 to avoid creating tasks that can never be completed.
+                if resource_allocation > slice.get_resource_by_index(idx).available:
+                    adjusted_amount = slice.get_resource_by_index(idx).available - 0.05 * slice.get_resource_by_index(idx).capacity
+                    resource_allocation = max(adjusted_amount, 0)
+                    
+                
+                duration = demand[resource_id] / resource_allocation if resource_allocation != 0 else 0
+                
+                # We only accept the task if the duration is greater than 0 and less than the max latency requirement of the slice.
+                if duration > 0 and duration <= slice.max_latency:
+                    task = Task(resource_id, self.time_step, duration=duration, resource_allocation=resource_allocation)
+                    register.add_task(task, slice.resources)
+                else:
+                    self.rejection_counts[agent] += 1
+            
+            # Only add register to slice if there is at least one task in the register.
+            # If there is no task, it means all tasks are rejected
+            # and we don't need to add an empty register to the slice.
+            if register.number_of_tasks() > 0:
+                slice.add_register(register)
+            else:
+                self.reward_track[self.time_step][agent] = 0 # If all tasks are rejected, we set reward to 0 for this time step for this agent.
+            
+            
+            #This is the end of the time step
+            #1. Update energy consumption of active tasks in the register
+            #2. Release resources of tasks that would be done before next time step
+            
+            register_dict = slice.get_all_registers()
+            for register in register_dict.values():
+                #What happens here is 
+                #1. the register call update function
+                #2. update function will update energy consumption of active tasks
+                #3. update function will release resources of tasks that would be done before next time step
+                #print(f'agent: {agent}, time_step: {self.time_step}, register creation time: {register.creation_time}')
+                register.update(slice.resources, self.time_step)
+            
+            #This is the beginning of the next time step, but before new demand
+            #We calculate the reward if there is any register finished before this point
+            reward = 0
+            creation_times = []
+            for creation_time, register in register_dict.items():
+                if register.is_done(self.time_step + 1):
+                    total_latency = register.get_total_latency()
+                    total_energy = register.get_total_energy_consumption()
+                    
+                    self.recent_latency[agent].append(total_latency)
+                    self.recent_energy[agent].append(total_energy)
+                    
+                    #print(f"Time Step: {self.time_step}, Agent: {agent}, Total Latency: {total_latency:.2f}, Total Energy: {total_energy:.2f}")
+                    #print(f"{self._minimum_latency() / total_latency:.2f}, {self._minimum_energy() / total_energy:.2f}")
+                    
+                    a = self._minimum_latency() / total_latency if total_latency > 0 else 0
+                    b = self._minimum_energy() / total_energy if total_energy > 0 else 0
+                                        
+                    reward = slice.latency_coeff * a + slice.energy_coeff * b   
+                    
+                    
+                    #print(f'time step {self.time_step}')
+                    #print(f'register creation time {register.creation_time}')
+                
+                    self.reward_track[register.creation_time][agent] = reward
+                    creation_times.append(creation_time)
+            
+            for creation_time in creation_times:
+                slice.remove_register(creation_time)
+
+        
+        reward_at_time = {}
+        for time in self.reward_track.keys():
+            # We check if the reward for this time step is ready. 
+            # If it is, we calculate the average reward of all agents 
+            # for this time step and assign it to all agents.
+            if time in self.reward_track and self._is_reward_ready(time):
+                for agent, reward in self.reward_track[time].items():
+                    if reward is None:
+                        raise ValueError(f"Reward for agent {agent} at time {time} is not ready.")
+                
+                avg_reward = np.mean(list(self.reward_track[time].values()))
+                reward = {agent: avg_reward for agent in self.agents}
+                reward_at_time[time] = reward
+                
+        if len(reward_at_time) > 0:
+            #print(self.reward_track)
+            for time in reward_at_time.keys():
+                del self.reward_track[time] # We delete the reward from reward_track after using it to save memory.
+            #print(self.reward_track)
+                
+        reward = {agent: -1 for agent in self.agents}
+        
+        if len(reward_at_time) > 0:
+            self.is_ready_value = True
+            self.ready_reward = reward_at_time
+            
+                
+        self.time_step += 1 
+          
+        obs = self._get_observation(self.time_step)
+        terminations = {agent: False for agent in self.agents}
+        truncations = {agent: False for agent in self.agents}
+        infos = {agent: {} for agent in self.agents}
+        
+        return obs, reward, terminations, truncations, infos
+    
+    def is_ready(self):
+        return self.is_ready_value
+    
+    def get_ready_reward(self):
+        if not self.is_ready:
+            raise ValueError("Reward is not ready yet.")
+        self.is_ready_value = False # Reset the ready state after getting the reward
+        
+        return self.ready_reward
+        
+    def state(self):
+        return np.concatenate([self._get_observation(agent) for agent in self.agents])
+        
+    
+    def _get_observation(self, time_step):
+        obs = {}
+        system_state = {agent: [] for agent in self.agents}
+        demand_state = {agent: [] for agent in self.agents}
+        preference_state = {agent: [] for agent in self.agents}
+        
+        for agent in self.agents:
+            slice = self.slices[agent]
+            
+            for resource_id in slice.idx_to_resource:
+                resource = slice.get_resource_by_id(resource_id)
+                system_state[agent].append(resource.available)
+                demand_state[agent].append(self.demand[agent].iloc[time_step][resource_id])
+            
+            preference_state[agent].append(slice.latency_coeff)
+            preference_state[agent].append(slice.energy_coeff)
+            obs[agent] = np.array(system_state[agent] + demand_state[agent] + preference_state[agent], dtype=np.float32)
+            #print(len(obs[agent]), len(system_state), len(demand_state), len(preference_state))
+        
+        return obs
+        
+        
+    def _read_config(self, config_path):
         with open(config_path, 'r') as f:
             config = json.load(f)
         
-        self.cpu_capacity = np.array(config['server']['resource']['cpu'], dtype=np.float32)
-        self.bw_capacity = np.array(config['link']['resource']['bandwidth'], dtype=np.float32)
-        
-        self.num_mecs = len(config['server']['resource']['cpu'])
-        self.num_links = len(config['link']['resource']['bandwidth'])
-        
-        #self.num_agents = len(config['agent']['id'])
-        agent_ids = config['agent']['id']
-        self.agents = [f"agent_{i}" for i in agent_ids]
-        self.possible_agents = self.agents[:]
-        
-        self.sim_workload = config['workload']
-        self.sim_cpu_demand = config['cpu_demand']
-        
-        self.latency_pref = {agent: config['latency_preference'] for agent in self.agents}
-        self.energy_pref = {agent: config['energy_preference'] for agent in self.agents}
-
-    @functools.lru_cache(maxsize=None)
-    def observation_space(self, agent):
-        # o_i = [rem_cpu, rem_bw, req_cpu, workload_size, pref_lambda, pref_rho]
-        return Box(low=0, high=1, shape=((self.num_mecs + self.num_links) * 2 + 2,), dtype=np.float32)
-
-    @functools.lru_cache(maxsize=None)
-    def action_space(self, agent):
-        # a_i = [cpu usage adjustment, bw usage adjustment] 
-        return Box(low=0, high=1, shape=(self.num_mecs + self.num_links,), dtype=np.float32)
-
-    def state(self):
-
-        return np.concatenate([
-            self.r_cpu / self.cpu_capacity,
-            self.r_bandwidth / self.bw_capacity,
-            self.all_cpu_req, 
-            self.all_workload_size,
-            self.all_prefs 
-        ]).astype(np.float32)
-
-    def reset(self, seed=None, options=None):
-        self.r_cpu = self.cpu_capacity.copy()
-        self.r_bandwidth = self.bw_capacity.copy()
-        
-        # Initialize internal tracking for state()
-        self.cpu_req = {agent: np.random.uniform(self.sim_cpu_demand['min'], self.sim_cpu_demand['max'], size=self.num_mecs).astype(np.float32) for agent in self.agents}
-        self.workload_size = {agent: np.random.uniform(self.sim_workload['min'], self.sim_workload['max'], size=self.num_links).astype(np.float32) for agent in self.agents}
-        self.all_cpu_req = np.mean(list(self.cpu_req.values()), axis=0)
-        self.all_workload_size = np.mean(list(self.workload_size.values()), axis=0)
-        self.all_prefs = np.concatenate([list(self.latency_pref.values()), list(self.energy_pref.values())])
-        
-        # For reward calculation and state tracking
-        self.allocated_cpu = {agent : {} for agent in self.agents}
-        self.allocated_bandwidth = {agent : {} for agent in self.agents}
-
-        obs = {a: np.concatenate([self.r_cpu / self.cpu_capacity, self.r_bandwidth / self.bw_capacity, (self.cpu_req[a] - self.sim_cpu_demand['min']) / (self.sim_cpu_demand['max'] - self.sim_cpu_demand['min']), (self.workload_size[a] - self.sim_workload['min']) / (self.sim_workload['max'] - self.sim_workload['min']), [self.latency_pref[a], self.energy_pref[a]]])  for a in self.agents}
-        infos = {a: {} for a in self.agents}
-        return obs, infos
-
-    def step(self, actions):
-        
-        global_reward = {}
-        some_reward_arrived = False
-        
-        
-        #TODO: Add logic to handle invalid actions (e.g., requesting more resources than available) and calculate penalties if needed
-        
-        checker = Checker(agents=self.agents, num_mecs=self.num_mecs, time_step=self.time_step)
-        
-        
-        # Convert items to a list so they can be shuffled
-        items = list(actions.items())
-        random.shuffle(items)
-        
-        #print(actions)
-        
-        w_b ={}
-        w_m_b = {}
-        latency = {}
-        # perform resource allocation based on actions
-        for agent_id, act in items:
+        self.resources = {}
             
-            # Update allocated resources based on action
-            allocated_cpu = act[:self.num_mecs] * self.cpu_capacity
-            allocated_bandwidth = act[self.num_mecs:] * self.bw_capacity
-            
-            for i in range(self.num_mecs):
-                if allocated_cpu[i] > self.r_cpu[i]:
-                    allocated_cpu[i] = max(0,self.r_cpu[i] / self.cpu_capacity[i] - 0.05) * self.cpu_capacity[i]  # Cap allocation to available resources
-                else:
-                    allocated_cpu[i] = min(allocated_cpu[i], self.r_cpu[i] / self.cpu_capacity[i] - 0.05) * self.cpu_capacity[i]  # Ensure allocation does not exceed available resources
-                    
-                self.r_cpu[i] -= allocated_cpu[i]
-                #self.allocated_cpu[agent_id].setdefault(self.time_step, []).append(allocated_cpu[i])
-            
-            
-            for j in range(self.num_links):
-                if allocated_bandwidth[j] > self.r_bandwidth[j]:
-                    allocated_bandwidth[j] = max(0,self.r_bandwidth[j] / self.bw_capacity[j] - 0.05) * self.bw_capacity[j]  # Cap allocation to available resources
-                else:
-                    allocated_bandwidth[j] = min(allocated_bandwidth[j], self.r_bandwidth[j] / self.bw_capacity[j] - 0.05) * self.bw_capacity[j]  # Ensure allocation does not exceed available resources
-                
-                self.r_bandwidth[j] -= allocated_bandwidth[j]
-                #self.allocated_bandwidth[agent_id].setdefault(self.time_step, []).append(allocated_bandwidth[j])
-            
-            checker.set_allocations(agent_id, allocated_cpu, allocated_bandwidth)
-            
-            # Calculate latency of each slice
-            
-            # latency associated with data transmission
-            data_rate = self._calculate_datarate(signal_to_noise_ratio=40, allocated_bandwidth=allocated_bandwidth)
-            w_a = np.sum(self.workload_size[agent_id] / (data_rate + 1e-6))  # Adding small value to avoid division by zero
-            
-            # latency associated with computation
-            w_m_b[agent_id] = self.cpu_req[agent_id] / (allocated_cpu + 1e-6)  # Adding small value to avoid division by zero
-            w_b[agent_id] = np.max(w_m_b[agent_id])  # Assuming latency is determined by the slowest MEC server processing the workload
-            
-            # Total latency  
-            latency[agent_id] = w_a + w_b[agent_id]
-        
-        U_m = 1 - self.r_cpu / self.cpu_capacity
-        
-        f_Um_t = self._calculate_power_consumption(U_m)
-        
-        counter = {agent: np.ceil(w_m_b[agent]).astype(np.int32) for agent in self.agents}
-        energy = {agent: f_Um_t for agent in self.agents}
-        
-        checker.set_counter(self.agents, self.num_mecs, counter)
-        checker.set_energy(self.agents, self.num_mecs, energy)
-        checker.set_latency(self.agents, latency)
-        
-        self.checker_dict[self.time_step] = checker
-        
-        #print(self.allocated_cpu)
-        
-        for i in self.checker_dict.keys():
-            if self.checker_dict[i].update(self.agents, self.num_mecs, energy, r_cpu=self.r_cpu, r_bandwidth=self.r_bandwidth, allocated_cpu=self.allocated_cpu, allocated_bandwidth=self.allocated_bandwidth):
-                
-                some_reward_arrived = True
-                
-                
-                self.recent_latencies.append(self.checker_dict[i].get_latency())
-                self.recent_energies.append(self.checker_dict[i].get_energy())
-                
-                if len(self.recent_latencies) < self.window:
-                    global_reward[i] = self.checker_dict[i].get_reward(min_latency=1, min_energy=1, latency_weight=self.latency_pref, energy_weight=self.energy_pref)
-                else:
-                    global_reward[i] = self.checker_dict[i].get_reward(min_latency=np.mean(self.recent_latencies), min_energy=np.mean(self.recent_energies), latency_weight=self.latency_pref, energy_weight=self.energy_pref)
-                del self.checker_dict[i]
-        
-        
-        # Update state for next step    
-        self.cpu_req = {agent: np.random.uniform(self.sim_cpu_demand['min'], self.sim_cpu_demand['max'], size=self.num_mecs).astype(np.float32) for agent in self.agents}
-        self.workload_size = {agent: np.random.uniform(self.sim_workload['min'], self.sim_workload['max'], size=self.num_links).astype(np.float32) for agent in self.agents}
-
-        
-
-        #Shared Reward 
-        rewards = {a: -1 for a in self.agents}
-        
-        terminations = {a: False for a in self.agents}
-        truncations = {a: False for a in self.agents}
-        obs = {a: np.concatenate([self.r_cpu / self.cpu_capacity, self.r_bandwidth / self.bw_capacity, (self.cpu_req[a] - self.sim_cpu_demand['min']) / (self.sim_cpu_demand['max'] - self.sim_cpu_demand['min']), (self.workload_size[a] - self.sim_workload['min']) / (self.sim_workload['max'] - self.sim_workload['min']), [self.latency_pref[a], self.energy_pref[a]]])  for a in self.agents}
-        infos = {a: {"update_reward": some_reward_arrived, "shared_reward": global_reward} for a in self.agents}
-        
-        #print(obs)
-        self.time_step += 1
-
-        return obs, rewards, terminations, truncations, infos
+        for i, item in enumerate(config):
+            if item['type'] == 'mec':
+                resource_id = item['type'] + '_' + str(item['id'])
+                self.resources[resource_id] = Resource('cpu', item['resources']['cpu'], item['type'], item['id'])
+                self.resources[resource_id].set_energy_calculator(EnergyCalculator())
+            elif item['type'] == 'link':
+                resource_id = item['type'] + '_' + str(item['id'])
+                self.resources[resource_id] = Resource('bandwidth', item['resources']['bandwidth'], item['type'], item['id'])
+                self.resources[resource_id].set_energy_calculator(EnergyCalculator())
 
 
-    def _calculate_power_consumption(self, resource_utilization_ratio):
-        
-        return 43.4779 * np.log(100 * resource_utilization_ratio) + 226.8324
+class Resource():
+    def __init__(self, resource_type, capacity, entity, entity_id):
+        self.type = resource_type
+        self.capacity = capacity
+        self.available = capacity
+        self.entity = entity
+        self.entity_id = entity_id
+        self.energy_calulator = None
     
-    def _calculate_datarate(self, signal_to_noise_ratio, allocated_bandwidth):
-        
-        return allocated_bandwidth * np.log2(1 + signal_to_noise_ratio)
-        
+    def set_energy_calculator(self, energy_calculator):
+        self.energy_calulator = energy_calculator
+
+    def allocate(self, amount):
+        if amount > self.available:
+            raise ValueError(f"Not enough {self.type} available to allocate. Requested: {amount}, Available: {self.available}")
+        self.available -= amount
     
+    def release(self, amount):
+        self.available += amount
+        if self.available > self.capacity:
+            self.available = self.capacity  # Ensure we don't exceed capacity
     
-class Checker():
-    def __init__(self, agents, num_mecs, time_step):
-        self.energy = {agent: np.zeros(num_mecs, dtype=np.float32) for agent in agents}
-        self.counter = {agent: np.zeros(num_mecs, dtype=np.int32) for agent in agents}
-        self.global_counter = 0
-        self.latency = {agent: 0 for agent in agents}
-        self.time_step = time_step
-        self.allocated_cpu = {agent : {} for agent in agents}
-        self.allocated_bandwidth = {agent : {} for agent in agents}
+    def get_energy_consumption(self):
+        if self.energy_calulator is None:
+            raise ValueError("Energy calculator not set for this resource.")
+        return self.energy_calulator.calculate_energy(self.type,self.capacity, self.available)
+
+class Slice():
+    def __init__(self, id, resources, latency_coeff = 0.5, energy_coeff = 0.5, max_latency = 4):
+        self.id = id
+        self.resources = resources # {resource_id: Resource}
+        self.latency_coeff = latency_coeff
+        self.energy_coeff = energy_coeff
+        self.max_latency = max_latency # measured in time steps
+        self.registers = {}        
         
-        
-    def set_allocations(self, agent, allocated_cpu, allocated_bandwidth):
-        self.allocated_cpu[agent] = allocated_cpu
-        self.allocated_bandwidth[agent] = allocated_bandwidth
-        
-    def set_counter(self, agents, num_mecs, counter):
-        for agent in agents:
-            for j in range(num_mecs):
-                self.counter[agent][j] = counter[agent][j]
-        
-        self.global_counter = np.max(np.concatenate(list(self.counter.values())))
+        self.idx_to_resource = []
+        for resource_id in resources.keys():
+            self.idx_to_resource.append(resource_id)
     
-    def set_energy(self, agents, num_mecs, energy):
-        for agent in agents:
-            for j in range(num_mecs):
-                self.energy[agent][j] = energy[agent][j]
+    def get_register(self, time):
+        return self.registers[time]
     
-    def set_latency(self, agents, latency):
-        for agent in agents:
-            self.latency[agent] = latency[agent]
+    def get_all_registers(self):
+        return self.registers
     
-    def update(self, agents, num_mecs, energy, r_cpu=None, r_bandwidth=None, allocated_cpu=None, allocated_bandwidth=None):
-        for agent in agents:
-            for j in range(num_mecs):
-                if self.counter[agent][j] > 0:
-                    self.energy[agent][j] += energy[agent][j]
-                    self.counter[agent][j] -= 1
-                    self.global_counter -= 1
-                    
-                    if self.counter[agent][j] == 0:
-                        
-                        r_cpu[j] +=  allocated_cpu[agent][j]
-                        
-                        for link in mec2links[j+1]:
-                            r_bandwidth[link] += allocated_bandwidth[agent][link]
+    def add_register(self, register):
+        self.registers[register.creation_time] = register
         
-                    
-        if self.global_counter == 0:
-            return True
+    def number_of_resources(self):
+        return len(self.resources)
+    
+    def get_resource_by_index(self, idx):
+        resource_id = self.idx_to_resource[idx]
+        return self.resources[resource_id]
+    
+    def get_resource_by_id(self, resource_id):
+        return self.resources[resource_id]
+    
+    def remove_register(self, creation_time):
+        #print('call remove register')
+        #print(self.registers)
+        del self.registers[creation_time]
+        #print(self.registers)
+    
+
+class Task():
+    def __init__(self, resource_id, start_from, duration, resource_allocation):
+        self.resource_id = resource_id
+        self.start_from = start_from
+        self.duration = duration
+        self.resource_allocation = resource_allocation
+        self.end = start_from + duration
+        self.energy_consumption = 0
+        self.is_consumed = False
+        self.is_released = False
+        self.number_of_updates = np.ceil(duration)
+    
+    def get_task_id(self):
+        return f"{self.resource_id}_{self.start_from:.2f}_{self.end:.2f}"
+    
+    def consume(self, resource):
+        if self.is_consumed:
+            raise ValueError("Task has already been consumed.")
+        self.is_consumed = True
+        resource[self.resource_id].allocate(self.resource_allocation)
+    
+    def release(self, resource):
+        if self.is_released:
+            raise ValueError("Task has already been released.")
+        self.is_released = True
+        resource[self.resource_id].release(self.resource_allocation)
+    
+    def update_energy_consumption(self, resource):
+        #print(f'Updating energy consumption for task on resource {self.resource_id}. Remaining updates: {self.number_of_updates}. Duration: {self.duration:.2f}, Max_updates: {np.ceil(self.duration)}, end: {self.end:.2f}')
+
+        if self.number_of_updates <= 0:
+            raise ValueError("Task has already been updated for the required number of updates.")
+        self.number_of_updates -= 1
+        this_resource = resource[self.resource_id]
+        self.energy_consumption += this_resource.get_energy_consumption() * self.resource_allocation / this_resource.capacity
+    
+    def get_energy_consumption(self):
+        return self.energy_consumption
+    
+    def is_done(self, current_time):
+        return current_time >= self.end
+    
+    def get_resource_id(self):
+        return self.resource_id
+    
+    def get_resource_allocation(self):
+        return self.resource_allocation
+    
+    def get_duration(self):
+        return self.duration
+    
+class Register():
+    def __init__(self, creation_time = None):
+        #print(f'Creating register at time {creation_time}')
+        self.tasks  = []
+        self.active_tasks = []
+        self.creation_time = creation_time
+    
+    def add_task(self, task, resource):
+        task.consume(resource)
+        self.tasks.append(task)
+        
+    def number_of_tasks(self):
+        return len(self.tasks)
+        
+    def is_done(self, current_time):
+        return np.all([task.is_done(current_time) for task in self.tasks])
+    
+    def _update_energy_consumption(self, resource, current_time):
+        for task in self.active_tasks:
+                task.update_energy_consumption(resource)
+    
+    def update(self, resource, current_time):
+        #print(f'tasks: {[task.get_task_id() for task in self.tasks]}')
+        #Get energy consumption of current active tasks
+        self.active_tasks = [task for task in self.tasks if not task.is_done(current_time)]
+        #print(f'active tasks: {[task.get_task_id() for task in self.active_tasks]}')
+        self._update_energy_consumption(resource, current_time)
+        
+        #Release resources of tasks that would be done before netxt time step
+        for task in self.active_tasks:
+            if task.is_done(current_time + 1):
+                task.release(resource)
+        
+    def get_total_energy_consumption(self):
+        return np.sum([task.get_energy_consumption() for task in self.tasks])
+    
+    def get_total_latency(self):
+        cpu_tasks = [task for task in self.tasks if 'mec' in task.get_resource_id()]
+        bandwidth_tasks = [task for task in self.tasks if 'link' in task.get_resource_id()]
+ 
+        
+        compute_latency = np.max([task.get_duration() for task in cpu_tasks]) if cpu_tasks else 0
+        bandwidth_latency = np.sum([task.get_duration() for task in bandwidth_tasks]) if bandwidth_tasks else 0
+        
+        return compute_latency + bandwidth_latency
+
+class EnergyCalculator():
+    def __init__(self):
+        None
+        
+    def calculate_energy(self, resource_type, capacity, available):
+        if resource_type == 'cpu':
+            utilization = (capacity - available) / capacity
+            return  43.4779 * np.log(100 * utilization) + 226.8324
+        elif resource_type == 'bandwidth':
+            return 0
         else:
-            return False
-    
-    def get_energy(self):
-        return np.mean([np.sum(self.energy[agent]) for agent in self.energy])
-    
-    def get_latency(self):
-        return np.mean([self.latency[agent] for agent in self.latency])
-    
-    def get_reward(self, min_latency, min_energy, latency_weight, energy_weight):
-        
-        rewards = []
-        
-        for agent in self.energy:
-            energy_consumption = np.sum(self.energy[agent])
-            normalized_energy = min_energy / (energy_consumption + 1e-6)  # Adding small value to avoid division by zero
-            normalized_latency = min_latency / (self.latency[agent] + 1e-6)  # Adding small value to avoid division by zero
-            reward = latency_weight[agent] * normalized_latency + energy_weight[agent] * normalized_energy
-            
-            rewards.append(reward)
-        
-        return np.mean(rewards)
-        
-        
-        
-
+            raise ValueError(f"Unknown resource type: {resource_type}")
     
         
-        
-# To use with TorchRL:
-# from torchrl.envs.libs.pettingzoo import PettingZooWrapper
-# env = PettingZooWrapper(NetworkEnv("config.json"), use_mask=False)
+    
+    

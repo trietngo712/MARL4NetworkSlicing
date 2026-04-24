@@ -1,4 +1,5 @@
 from collections import deque
+import copy
 import functools
 import random
 import numpy as np
@@ -12,7 +13,7 @@ import pandas as pd
 import os 
 
 NUM_AGENTS = 4
-WINDOW = 20
+WINDOW = 1000
 
 class NetworkEnv(ParallelEnv):
     def __init__(self, config_path = None):
@@ -124,7 +125,7 @@ class NetworkEnv(ParallelEnv):
         return obs, infos
     
     def step(self, actions):
-        print(f'-----------------{self.time_step}-------------------')
+        #print(f'-----------------{self.time_step}-------------------')
         #print(self.reward_track)
         #print(f"TIME STEP: {self.time_step}")
         # We process agents in random order to avoid bias towards certain agents.
@@ -241,8 +242,7 @@ class NetworkEnv(ParallelEnv):
         reward = {agent: -1 for agent in self.agents}
         
         if len(reward_at_time) > 0:
-            self.is_ready_value = True
-            self.ready_reward = reward_at_time
+            self.ready_reward.update(reward_at_time)
             
                 
         self.time_step += 1 
@@ -255,14 +255,15 @@ class NetworkEnv(ParallelEnv):
         return obs, reward, terminations, truncations, infos
     
     def is_ready(self):
-        return self.is_ready_value
+        return len(self.ready_reward) > 0
     
     def get_ready_reward(self):
-        if not self.is_ready:
-            raise ValueError("Reward is not ready yet.")
-        self.is_ready_value = False # Reset the ready state after getting the reward
         
-        return self.ready_reward
+        ready_reward = copy.deepcopy(self.ready_reward)
+        
+        self.ready_reward = {}
+        
+        return ready_reward
         
     def state(self):
         return np.concatenate([self._get_observation(agent) for agent in self.agents])

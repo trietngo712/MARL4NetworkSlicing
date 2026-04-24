@@ -52,6 +52,7 @@ packages/
 .env.*
 *.key
 *.pem
+*.venv
 
 # ----------------------------------------
 # Build outputs

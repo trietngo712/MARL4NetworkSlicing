@@ -16,21 +16,29 @@ NUM_AGENTS = 4
 WINDOW = 1000
 
 class NetworkEnv(ParallelEnv):
-    def __init__(self, config_path = None):
+    def __init__(self, config_path = None, num_agents = NUM_AGENTS, traffic_path = None, log_path = None):
         super().__init__()
         
         if config_path is None:
             raise ValueError("Config path must be provided.")
         
-        self.config_path = config_path
+        if traffic_path is None:
+            raise ValueError("Traffic path must be provided")
         
-                #Reset the environment to an initial state and return the initial observations and infos for all agents.
+        if log_path is None:
+            raise ValueError("Log path must be provided")
+        
+        self.config_path = config_path
+        self.traffic_path = traffic_path
+        self.log_path = log_path
+        
+        #Reset the environment to an initial state and return the initial observations and infos for all agents.
         self.time_step = 0
         
         #read config file and create resources and slices
         self._read_config(self.config_path)
         
-        self.agents = [f"agent_{i}" for i in range(NUM_AGENTS)]
+        self.agents = [f"agent_{i}" for i in range(num_agents)]
         self.possible_agents = self.agents[:]
         
         self.slices = {}
@@ -45,9 +53,19 @@ class NetworkEnv(ParallelEnv):
         
         self.ready_reward = {}
         self.is_ready_value = False
-
+        
+        self.recorders = {}
+        
+        for _, slice in self.slices.items():
+            self.recorders[slice.id] = Recorder(slice)
+            
         
 
+        
+    def log_result(self):
+        for id, recorder in self.recorders:
+            recorder.save_result(os.path.join(id, self.log_path))
+            
         
     def say_hello(self):
         print("Hello from NetworkEnv!")
@@ -89,7 +107,7 @@ class NetworkEnv(ParallelEnv):
         return Box(low=0.0, high=1.0, shape=(number_of_resources,), dtype=np.float32)
     
     def reset(self, seed=None, options=None):
-        print("-----------------RESET-------------------")
+        #print("-----------------RESET-------------------")
         #Reset the environment to an initial state and return the initial observations and infos for all agents.
         self.time_step = 0
         
@@ -109,7 +127,7 @@ class NetworkEnv(ParallelEnv):
         
         self.demand = {}
         for agent in self.agents:
-            self.demand[agent] = pd.read_csv(os.path.join('traffic', f'{agent}_demand.csv'))
+            self.demand[agent] = pd.read_csv(os.path.join(self.traffic_path, f'{agent}_demand.csv'))
         
         self.rejection_counts = {agent: 0 for agent in self.agents}
         
@@ -140,11 +158,13 @@ class NetworkEnv(ParallelEnv):
             #2. Create a register for this time 
             #3. For each resource, check if the demand can be met with the allocated resource. If yes, create a task and add to register. If no, reject the task.
             
+            recorder = self.recorders[agent]
             slice = self.slices[agent]
             demand = self.demand[agent].iloc[self.time_step]
             register = Register(creation_time=self.time_step)
             
             for idx, resource_id in enumerate(slice.idx_to_resource):
+                recorder.add_action(resource_id, action[idx])
                 resource_allocation = action[idx] * slice.get_resource_by_index(idx).capacity
                 
                 # We add a safety margin here
@@ -155,7 +175,8 @@ class NetworkEnv(ParallelEnv):
                 if resource_allocation > slice.get_resource_by_index(idx).available:
                     adjusted_amount = slice.get_resource_by_index(idx).available - 0.05 * slice.get_resource_by_index(idx).capacity
                     resource_allocation = max(adjusted_amount, 0)
-                    
+                
+                recorder.add_allocation(resource_id, resource_allocation)
                 
                 duration = demand[resource_id] / resource_allocation if resource_allocation != 0 else 0
                 
@@ -163,8 +184,10 @@ class NetworkEnv(ParallelEnv):
                 if duration > 0 and duration <= slice.max_latency:
                     task = Task(resource_id, self.time_step, duration=duration, resource_allocation=resource_allocation)
                     register.add_task(task, slice.resources)
+                    recorder.add_rejection(resource_id, 1)
                 else:
                     self.rejection_counts[agent] += 1
+                    recorder.add_rejection(resource_id, 0)
             
             # Only add register to slice if there is at least one task in the register.
             # If there is no task, it means all tasks are rejected
@@ -207,6 +230,10 @@ class NetworkEnv(ParallelEnv):
                     b = self._minimum_energy() / total_energy if total_energy > 0 else 0
                                         
                     reward = slice.latency_coeff * a + slice.energy_coeff * b   
+                    
+                    recorder.add_latency(total_latency)
+                    recorder.add_energy(total_energy)
+                    recorder.add_reward(reward)
                     
                     
                     #print(f'time step {self.time_step}')
@@ -487,3 +514,59 @@ class EnergyCalculator():
         
     
     
+class Recorder():
+    def __init__(self, slice):
+        
+        self.slice_id = slice.id
+        self.idx_to_resource =slice.idx_to_resource
+        
+        self.action = {resource: [] for resource in self.idx_to_resource}
+        self.allocation = {resource: [] for resource in self.idx_to_resource}
+        self.latency = []
+        self.energy = []
+        self.reward = []
+        self.rejection = {resource: [] for resource in self.idx_to_resource}
+        
+    
+    def add_action(self, id, action):
+        self.action[id].append(action)
+        
+    def add_allocation(self, id, allocation):
+        self.allocation[id].append(allocation)
+        
+    def add_latency(self, latency):
+        self.latency.append(latency)
+    
+    def add_energy(self, energy):
+        self.energy.append(energy)
+    
+    def add_rejection(self, id, rejection):
+        self.rejection[id].append(rejection)
+    
+    def add_reward(self,reward):
+        self.reward.append(reward)
+    
+    def save_result(self, path):
+        action = pd.DataFrame(self.action)
+        allocation = pd.DataFrame(self.allocation)
+        latency = pd.DataFrame(self.latency)
+        energy = pd.DataFrame(self.energy)
+        rejection = pd.DataFrame(self.rejection)
+        reward = pd.DataFrame(self.reward)
+        
+        path_action = os.path.join(path, 'action.csv')
+        path_allocation = os.path.join(path, 'allocation.csv')
+        path_latency = os.path.join(path,'latency.csv')
+        path_energy = os.path.join(path, 'energy.csv')
+        path_rejection = os.path.join(path, 'rejection.csv')
+        path_reward = os.path.join(path, 'reward.csv')
+        
+        action.to_csv(path = path_action, index= False)
+        allocation.to_csv(path = path_allocation, index = False)
+        latency.to_csv(path = path_latency, index = False)
+        energy.to_csv(path = path_energy, index = False)
+        rejection.to_csv(path = path_rejection, index = False)
+        reward.to_csv(path = path_reward, index = False)
+        
+        
+        

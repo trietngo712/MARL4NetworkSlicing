@@ -5,9 +5,10 @@ import random
 import heapq
 import csv
 import pandas as pd
+import os
 
 NUM_STEPS = 50000
-NUM_AGENTS = 5
+NUM_AGENTS = 1
 SEED = 0
 
 random.seed(SEED)
@@ -22,7 +23,7 @@ for i in range(NUM_AGENTS):
 demand = {agent: [] for agent in agents}
 
 
-with open('configs\\resource_config.json', 'r') as f:
+with open('experiments/experiment_0/configs/resource_config.json', 'r') as f:
     config = json.load(f)
 
 
@@ -32,10 +33,12 @@ for t in range(NUM_STEPS):
         for item in config:
             if item['type'] == 'mec':
                 resource_id = item['type'] + '_' + str(item['id'])
-                resource_demand[resource_id] = np.random.uniform(1, 2)
+                #resource_demand[resource_id] = np.random.uniform(1, 2)
+                resource_demand[resource_id] = 1.5
             elif item['type'] == 'link':
                 resource_id = item['type'] + '_' + str(item['id'])
-                resource_demand[resource_id] = np.random.uniform(2.5, 5)
+                #resource_demand[resource_id] = np.random.uniform(2.5, 5)
+                resource_demand[resource_id] = 3.75
         
         demand[agent].append(resource_demand)
 

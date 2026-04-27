@@ -1,0 +1,39 @@
+{
+    "n_agent": 1,
+    "n_mecs" : 5,
+    "n_links": 10,
+    "demand" : {
+        "description": "constant",
+        "cpu": 1.5,
+        "bandwidth": 3.75 
+    },
+    "transition_per_batch": 128,
+    "n_iterations": 20,
+    "min_replay_size":500,
+    "memory_size":10000,
+    "n_optimizer_steps": 8,
+    "train_batch_size": 128,
+    "lr": 3e-4,
+    "max_grad_norm":1.0,
+    "gamma": 0.99,
+    "polyak_tau": 0.005,
+
+    "critic": {
+        "num_cells":64,
+        "depth":2,
+        "share_parameter": true,
+        "centralized_critic": true
+    },
+
+    "policy": {
+        "num_cells":64,
+        "depth":2,
+        "share_parameter":true
+    },
+
+    "noise": {
+        "sigma_init" : 0.3,
+        "sigma_end": 0.05
+    }
+
+}

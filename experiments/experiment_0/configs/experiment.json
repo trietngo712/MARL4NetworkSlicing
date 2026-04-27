@@ -8,7 +8,7 @@
         "bandwidth": 3.75 
     },
     "transition_per_batch": 128,
-    "n_iterations": 20,
+    "n_iterations": 3900,
     "min_replay_size":500,
     "memory_size":10000,
     "n_optimizer_steps": 8,
@@ -19,14 +19,14 @@
     "polyak_tau": 0.005,
 
     "critic": {
-        "num_cells":64,
+        "num_cells":256,
         "depth":2,
         "share_parameter": true,
         "centralized_critic": true
     },
 
     "policy": {
-        "num_cells":64,
+        "num_cells":256,
         "depth":2,
         "share_parameter":true
     },

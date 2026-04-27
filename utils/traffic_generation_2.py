@@ -7,7 +7,7 @@ import csv
 import pandas as pd
 import os
 
-NUM_STEPS = 50000
+NUM_STEPS = 500000
 NUM_AGENTS = 1
 SEED = 0
 

@@ -8,6 +8,7 @@ import copy
 import tempfile
 import numpy as np
 
+import pandas as pd
 import torch
 
 from matplotlib import pyplot as plt
@@ -121,7 +122,7 @@ def main():
     min_replay_size = config_exp.get('min_replay_size')
     memory_size = config_exp.get('memory_size')
     n_optimizer_steps = config_exp.get('n_optimizer_steps')
-    train_batch_size = config_exp.get('training_batch_size')
+    train_batch_size = config_exp.get('train_batch_size')
     lr = config_exp.get('lr')
     gamma = config_exp.get('gamma')
     polyak_tau = config_exp.get('polyak_tau')
@@ -164,6 +165,7 @@ def main():
     group_map=None,                # Defaults to one group per agent name
     #group_map= None,
     categorical_actions=False,       # Useful if your actions are Discrete
+    device = device
     )
     
     #transformed_env = TransformedEnv(
@@ -225,18 +227,31 @@ def main():
         policies[group] = policy
     
     #create noise
+    #exploration_policies = {}
+    #for group, _agents in env.group_map.items():
+    #    exploration_policy = TensorDictSequential(
+    #        policies[group],
+    #        AdditiveGaussianModule(
+    #            spec=policies[group].spec,
+    #            annealing_num_steps=total_frames
+    #            // 2,  # Number of frames after which sigma is sigma_end
+    #            action_key=(group, "action"),
+    #            sigma_init=noise_sigma_init,  # Initial value of the sigma
+    #            sigma_end=noise_sigma_end,  # Final value of the sigma
+    #        ),
+    #    )
+    #exploration_policies[group] = exploration_policy
+    
     exploration_policies = {}
     for group, _agents in env.group_map.items():
         exploration_policy = TensorDictSequential(
             policies[group],
-            AdditiveGaussianModule(
-                spec=policies[group].spec,
+            OrnsteinUhlenbeckProcessModule(
+                spec=policies[group].spec.clone(),
                 annealing_num_steps=total_frames
                 // 2,  # Number of frames after which sigma is sigma_end
                 action_key=(group, "action"),
-                sigma_init=noise_sigma_init,  # Initial value of the sigma
-                sigma_end=noise_sigma_end,  # Final value of the sigma
-            ),
+            ).to(device),
         )
         exploration_policies[group] = exploration_policy
     
@@ -368,8 +383,6 @@ def main():
         return batch
     
     
-    # --- Setup Constants ---
-
 
     # 1. Initialize logic
     pbar = tqdm(total=n_iters)
@@ -378,11 +391,14 @@ def main():
     iteration_rewards = {group: [] for group in env.group_map.keys()}
 
     incomplete_transitions = {group: {} for group in env.group_map.keys()}  # {group: {ticket_id: (time_step, transition)}}
+    
+    reward_check = []
 
     synchronized_timer = 0
 
     for iteration, batch in enumerate(collector):
         current_frames = batch.numel()    
+        #print(f'current_frames: {current_frames}')
         # Pre-process batch (handling masking, global state, etc.)
         batch = process_batch(batch) 
         #print(batch)
@@ -425,7 +441,7 @@ def main():
                     reward_tensor = torch.tensor(np.array(list(reward.values())).reshape(1, n_agent, 1), dtype=torch.float32)
                     complete_transition.set(("next", group, "reward"), reward_tensor)
                     
-                
+                    reward_check.append(list(reward.values()))
                     #print(f"new reward: {complete_transition['next'][group]['reward']}")
                     
                     
@@ -463,7 +479,7 @@ def main():
                 # Decay exploration if applicable
                 exploration_policies[group][-1].step(current_frames)
 
-    # --- LOGGING ---
+        # --- LOGGING ---
         current_log_status = []
         for group in env.group_map.keys():
             # Move iteration rewards to the permanent history map
@@ -481,6 +497,9 @@ def main():
         pbar.set_description(" | ".join(current_log_status))
         pbar.update() 
     
+    env.log_result()
+    df = pd.DataFrame(reward_check)
+    df.to_csv(os.path.join('experiments/experiment_0/results','check.csv'), index=False)
 
 if __name__ == "__main__":
     main()

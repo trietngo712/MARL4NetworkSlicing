@@ -63,8 +63,9 @@ class NetworkEnv(ParallelEnv):
 
         
     def log_result(self):
-        for id, recorder in self.recorders:
-            recorder.save_result(os.path.join(id, self.log_path))
+        print(self.recorders)
+        for id, recorder in self.recorders.items():
+            recorder.save_result(os.path.join(self.log_path, id))
             
         
     def say_hello(self):
@@ -81,7 +82,8 @@ class NetworkEnv(ParallelEnv):
         condition = np.all([len(self.recent_latency[agent]) >= WINDOW for agent in self.agents])
         
         if condition:
-            min_latency = np.mean([np.min(self.recent_latency[agent]) for agent in self.agents])
+            #min_latency = np.mean([np.min(self.recent_latency[agent]) for agent in self.agents])
+            return 1
         
         return min_latency
     
@@ -90,7 +92,8 @@ class NetworkEnv(ParallelEnv):
         condition = np.all([len(self.recent_energy[agent]) >= WINDOW for agent in self.agents])
         
         if condition:
-            min_energy = np.mean([np.min(self.recent_energy[agent]) for agent in self.agents])
+            #min_energy = np.mean([np.min(self.recent_energy[agent]) for agent in self.agents])
+            return 100
         
         return min_energy
 
@@ -307,8 +310,8 @@ class NetworkEnv(ParallelEnv):
             
             for resource_id in slice.idx_to_resource:
                 resource = slice.get_resource_by_id(resource_id)
-                system_state[agent].append(resource.available)
-                demand_state[agent].append(self.demand[agent].iloc[time_step][resource_id])
+                system_state[agent].append(resource.available / resource.capacity)
+                demand_state[agent].append(self.demand[agent].iloc[time_step][resource_id] / resource.capacity)
             
             preference_state[agent].append(slice.latency_coeff)
             preference_state[agent].append(slice.energy_coeff)
@@ -529,12 +532,15 @@ class Recorder():
         
     
     def add_action(self, id, action):
+        #print('record')
         self.action[id].append(action)
         
     def add_allocation(self, id, allocation):
+        #print('record')
         self.allocation[id].append(allocation)
         
     def add_latency(self, latency):
+        #print('record')
         self.latency.append(latency)
     
     def add_energy(self, energy):
@@ -547,26 +553,38 @@ class Recorder():
         self.reward.append(reward)
     
     def save_result(self, path):
-        action = pd.DataFrame(self.action)
-        allocation = pd.DataFrame(self.allocation)
-        latency = pd.DataFrame(self.latency)
-        energy = pd.DataFrame(self.energy)
-        rejection = pd.DataFrame(self.rejection)
-        reward = pd.DataFrame(self.reward)
-        
-        path_action = os.path.join(path, 'action.csv')
-        path_allocation = os.path.join(path, 'allocation.csv')
-        path_latency = os.path.join(path,'latency.csv')
-        path_energy = os.path.join(path, 'energy.csv')
-        path_rejection = os.path.join(path, 'rejection.csv')
-        path_reward = os.path.join(path, 'reward.csv')
-        
-        action.to_csv(path = path_action, index= False)
-        allocation.to_csv(path = path_allocation, index = False)
-        latency.to_csv(path = path_latency, index = False)
-        energy.to_csv(path = path_energy, index = False)
-        rejection.to_csv(path = path_rejection, index = False)
-        reward.to_csv(path = path_reward, index = False)
-        
+        # 1. Ensure the directory exists before saving
+        try:
+            if not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
+                print(f"Created directory: {path}")
+
+            # Data map to make saving cleaner and more maintainable
+            data_to_save = {
+                'action.csv': self.action,
+                'allocation.csv': self.allocation,
+                'latency.csv': self.latency,
+                'energy.csv': self.energy,
+                'rejection.csv': self.rejection,
+                'reward.csv': self.reward
+            }
+
+            for filename, data in data_to_save.items():
+                # 2. Check if data is empty or None before converting to DataFrame
+                if data is not None and len(data) > 0:
+                    df = pd.DataFrame(data)
+                    full_path = os.path.join(path, filename)
+                    
+                    # 3. Handle specific file writing errors
+                    df.to_csv(full_path, index=False)
+                else:
+                    print(f"Warning: {filename} was not saved because the data was empty.")
+
+            print(f"Successfully saved all logs to: {path}")
+
+        except PermissionError:
+            print(f"Error: Permission denied when writing to {path}. Check if the folder is open in another app.")
+        except Exception as e:
+            print(f"An unexpected error occurred while saving results: {e}")        
         
         

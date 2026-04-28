@@ -253,8 +253,8 @@ def main():
                 annealing_num_steps=total_frames
                 // 2,  # Number of frames after which sigma is sigma_end
                 action_key=(group, "action"),
-                theta=0.3,
-                sigma = 0.1
+                eps_end= 0.005,
+                sigma=0.9
             ).to(device),
         )
         exploration_policies[group] = exploration_policy
@@ -356,7 +356,7 @@ def main():
                 loss.actor_network_params.flatten_keys().values(), lr=lr
             ),
             "loss_value": torch.optim.Adam(
-                loss.value_network_params.flatten_keys().values(), lr=lr*10
+                loss.value_network_params.flatten_keys().values(), lr=lr * 10
             ),
         }
         for group, loss in losses.items()

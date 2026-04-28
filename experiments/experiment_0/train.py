@@ -24,6 +24,7 @@ from torchrl.collectors import Collector # This is a class for collecting data s
 from torchrl.data import LazyMemmapStorage, RandomSampler, ReplayBuffer # These are classes for storing and sampling data. LazyMemmapStorage allows for efficient storage of large datasets on disk, RandomSampler is used to sample data randomly from a dataset, and ReplayBuffer is a common structure used in reinforcement learning to store past experiences for training.
 
 from torchrl.envs import (
+    InitTracker,
     check_env_specs, # This function checks the specifications of an environment to ensure they are valid and compatible with the expected format.
     ExplorationType, # This is an enumeration that defines different types of exploration strategies that can be used in reinforcement learning.
     PettingZooEnv,  # This is a wrapper for environments from the PettingZoo library, which provides a collection of multi-agent environments for reinforcement learning research.
@@ -167,6 +168,7 @@ def main():
     categorical_actions=False,       # Useful if your actions are Discrete
     device = device
     )
+    env = TransformedEnv(env, InitTracker())
     
     #transformed_env = TransformedEnv(
     #    env,
@@ -251,6 +253,8 @@ def main():
                 annealing_num_steps=total_frames
                 // 2,  # Number of frames after which sigma is sigma_end
                 action_key=(group, "action"),
+                theta=0.3,
+                sigma = 0.1
             ).to(device),
         )
         exploration_policies[group] = exploration_policy
@@ -352,7 +356,7 @@ def main():
                 loss.actor_network_params.flatten_keys().values(), lr=lr
             ),
             "loss_value": torch.optim.Adam(
-                loss.value_network_params.flatten_keys().values(), lr=lr
+                loss.value_network_params.flatten_keys().values(), lr=lr*10
             ),
         }
         for group, loss in losses.items()

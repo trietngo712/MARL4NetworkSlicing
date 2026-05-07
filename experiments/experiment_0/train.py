@@ -154,7 +154,7 @@ def main():
     #    else torch.device("cpu")
     #)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    #print(device)
+    print(device)
     
     # creat env
     print(args.config_path_resource)
@@ -253,8 +253,6 @@ def main():
                 annealing_num_steps=total_frames
                 // 2,  # Number of frames after which sigma is sigma_end
                 action_key=(group, "action"),
-                eps_end= 0.1,
-                sigma=0.05
             ).to(device),
         )
         exploration_policies[group] = exploration_policy
@@ -504,6 +502,43 @@ def main():
     env.log_result()
     df = pd.DataFrame(reward_check)
     df.to_csv(os.path.join('experiments/experiment_0/results','check.csv'), index=False)
+    
+    # Create a list to hold the flattened rows
+    flattened_data = []
 
+    for group, transitions in incomplete_transitions.items():
+        for timestamp, td in transitions.items():
+            # 1. Convert TensorDict to a flat dictionary
+            # We use .cpu() in case data is on GPU, and .numpy() for serialization
+            row = {
+                "group": group,
+                "timestamp": timestamp,
+            }
+            
+            # 2. Extract key values from the TensorDict
+            # This loops through the keys in your group_data (obs, action, etc.)
+            for key in td.keys():
+                val = td.get(key)
+                if isinstance(val, torch.Tensor):
+                    # Flatten the tensor so it fits in a CSV cell or multiple columns
+                    row[key] = val.detach().cpu().numpy().tolist()
+                else:
+                    row[key] = val
+            
+            flattened_data.append(row)
+
+    # 3. Create DataFrame and Save
+    if flattened_data:
+        df_incomplete = pd.DataFrame(flattened_data)
+        save_path = os.path.join('experiments/experiment_0/results', 'incomplete_transitions.csv')
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        df_incomplete.to_csv(save_path, index=False)
+        print(f"Saved {len(flattened_data)} incomplete transitions to {save_path}")
+    else:
+        print("No incomplete transitions to save.")
+        
 if __name__ == "__main__":
     main()

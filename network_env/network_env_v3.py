@@ -16,18 +16,17 @@ logger = logging.getLogger(__name__)
 
 TEST_MODE = False  # Set to True to enable test-specific logging behavior
 
-class NetworkEnvV2(ParallelEnv):
+class NetworkEnvV3(ParallelEnv):
     
     def __init__(self, n_slices=1, resource_path=None, traffic_path=None, log_path=None,
-                 resource_scaling_factor=1.0, scheduler=None, test_demand=None, alpha=1.0, beta=100.0):
+                 resource_scaling_factor=1.0, scheduler=None, test_demand=None):
         self.n_slices = n_slices
         self.resource_scaling_factor = resource_scaling_factor
         self.scheduler = scheduler if scheduler is not None else FIFOScheduler()
         self.log_path = log_path
         self.traffic_path = traffic_path
         self.test_demand = test_demand
-        self.alpha = alpha
-        self.beta = beta
+        
         # Configure logging with log_path
         self._setup_logging()
         
@@ -43,8 +42,8 @@ class NetworkEnvV2(ParallelEnv):
             self.slices[agent] = Slice(slice_id=agent, resource=self.resources)
         
         self.current_time = 0
-        #self.alpha = 1.0
-        #self.beta = 100.0
+        self.alpha = 1.0
+        self.beta = 100.0
         # Structure: { arrival_time_t_prime: { 'slice_0': reward_val, 'slice_1': reward_val } }
         self._ready_rewards_ledger = {}
         self.recorders = {agent: Recorder(self.slices[agent]) for agent in self.agents}
@@ -149,7 +148,7 @@ class NetworkEnvV2(ParallelEnv):
         
         if self.test_demand is not None:
             new_task = Task(arrival_time=self.current_time, resource_demand={
-                res_id: self.test_demand * self.resources[res_id].capacity
+                res_id: self.test_demand
                 for res_id in slice_obj.idx_to_resource
             })
             
@@ -291,8 +290,6 @@ class NetworkEnvV2(ParallelEnv):
                     
                     reward_task = (lambda_i * (self.alpha / end_to_end_latency)) + \
                                   (rho_i * (self.beta / max(1e-5, task.accumulated_energy)))
-                    
-                    #reward_task = - end_to_end_latency
                     
                     recorder.add_latency(task.arrival_time, end_to_end_latency)
                     recorder.add_energy(task.arrival_time, float(task.accumulated_energy))
@@ -494,7 +491,7 @@ class Resource():
         if self.resource_type == 'link':
             return 0.0 
             
-        return 43.4779 * np.log(100 * utilization) + 226.8324 if np.log(100 * utilization) > 0 else 226.8324
+        return min(43.4779 * np.log(100 * utilization) + 226.8324, 226.8324)
 
     def allocate(self, amount):
         if amount <= self.available_capacity:

@@ -17,13 +17,13 @@ np.random.seed(SEED)
 agents =[]
 
 for i in range(NUM_AGENTS):
-    agents.append(f"agent_{i}")
+    agents.append(f"slice_{i}")
     
 
 demand = {agent: [] for agent in agents}
 
 
-with open('experiments/experiment_0/configs/resource_config.json', 'r') as f:
+with open('experiments/experiment_1/configs/resource_config.json', 'r') as f:
     config = json.load(f)
 
 
@@ -34,11 +34,11 @@ for t in range(NUM_STEPS):
             if item['type'] == 'mec':
                 resource_id = item['type'] + '_' + str(item['id'])
                 #resource_demand[resource_id] = np.random.uniform(1, 2)
-                resource_demand[resource_id] = 1.5
+                resource_demand[resource_id] = 1
             elif item['type'] == 'link':
                 resource_id = item['type'] + '_' + str(item['id'])
                 #resource_demand[resource_id] = np.random.uniform(2.5, 5)
-                resource_demand[resource_id] = 3.75
+                resource_demand[resource_id] = 1
         
         demand[agent].append(resource_demand)
 

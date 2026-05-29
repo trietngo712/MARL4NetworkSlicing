@@ -1,0 +1,31 @@
+*** Begin Patch
+*** Update File: /home/tngo/MARL4NetworkSlicing/experiments/experiment_1/results/visualization.ipynb
+@@
+-                "# 3. Create the interactive slider",
+-                "interact(",
+-                "    plot_distribution, ",
+-                "    window_range=IntRangeSlider(",
+-                "        value=[0, 100],",
+-                "        min=0,",
+-                "        max=len(series),",
+-                "        step=1,",
+-                "        description='Window:',",
+-                "        continuous_update=False # Set to True for smoother, high-perf updates",
+-                "    )",
+-                ")"
++                "# 3. Create the interactive slider",
++                "try:",
++                "    interact(",
++                "        plot_distribution, ",
++                "        window_range=IntRangeSlider(",
++                "            value=[0, 100],",
++                "            min=0,",
++                "            max=len(series),",
++                "            step=1,",
++                "            description='Window:',",
++                "            continuous_update=False",
++                "        )",
++                "    )",
++                "except Exception as e:",
++                "    print('Skipping interactive widget in headless execution:', e)"
+*** End Patch

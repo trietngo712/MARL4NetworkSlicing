@@ -81,8 +81,8 @@ class NetworkEnv(ParallelEnv):
         min_latency = 1
         #condition = np.all([len(self.recent_latency[agent]) >= WINDOW for agent in self.agents])
         
-        if len(self.recent_latency) > 0:
-            min_latency = np.mean([np.min(self.recent_latency[agent]) for agent in self.agents])
+        #if len(self.recent_latency) > 0:
+        #    min_latency = np.mean([np.min(self.recent_latency[agent]) for agent in self.agents])
         
         return min_latency
     
@@ -90,8 +90,8 @@ class NetworkEnv(ParallelEnv):
         min_energy = 100
         #condition = np.all([len(self.recent_energy[agent]) >= WINDOW for agent in self.agents])
         
-        if len(self.recent_energy):
-            min_energy = np.mean([np.min(self.recent_energy[agent]) for agent in self.agents])
+        #if len(self.recent_energy):
+        #    min_energy = np.mean([np.min(self.recent_energy[agent]) for agent in self.agents])
         
         return min_energy
 
@@ -166,9 +166,10 @@ class NetworkEnv(ParallelEnv):
             
             for idx, resource_id in enumerate(slice.idx_to_resource):
                 recorder.add_availability(resource_id, slice.get_resource_by_index(idx).available)
-                scaled_action = (action[idx] + 1) / 2
+                #scaled_action = (action[idx] + 1) / 2
+                scaled_action = action[idx] * 0.475 + 0.525
                 recorder.add_action(resource_id, scaled_action)
-                resource_allocation = 0.4 * scaled_action * slice.get_resource_by_index(idx).capacity
+                resource_allocation = scaled_action * slice.get_resource_by_index(idx).capacity
                 
                 # We add a safety margin here
                 # If the requested resource allocation exceeds the available resource, 
@@ -511,7 +512,7 @@ class EnergyCalculator():
     def calculate_energy(self, resource_type, capacity, available):
         if resource_type == 'cpu':
             utilization = (capacity - available) / capacity
-            return  43.4779 * np.log(100 * utilization) + 226.8324
+            return  43.4779 * np.log(100 * utilization) + 226.8324 if np.log(100 * utilization) > 0 else 226.8324
         elif resource_type == 'bandwidth':
             return 0
         else:

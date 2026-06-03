@@ -61,6 +61,7 @@ root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(root_path)
 
 from network_env.network_env_v2 import NetworkEnvV2 # This is a function that creates a parallel environment for the network slicing task, which allows for efficient handling of multiple agents in a multi-agent reinforcement learning setting.
+from network_env.network_env_v3 import NetworkEnvV3 # This is a function that creates a parallel environment for the network slicing task, which allows for efficient handling of multiple agents in a multi-agent reinforcement learning setting. It is an updated version of NetworkEnvV2 with additional features and improvements.
 
 def load_config(file_path):
     """Reads and parses the JSON configuration file."""
@@ -158,13 +159,12 @@ def main():
     
     # creat env
     print(args.config_path_resource)
-    custom_env = NetworkEnvV2(
+    custom_env = NetworkEnvV3(
         n_slices=config_exp.get('n_agent'),
         resource_path=args.config_path_resource,
         traffic_path=args.traffic_path,
         log_path=args.log_path,
-        test_demand=0.06,
-        beta = 0
+        test_demand=0.5,
     )
     
     env = PettingZooWrapper(
@@ -436,6 +436,8 @@ def main():
                 
                 #print(f'group data \n {group_data}')
                 
+                #if time == 1100:
+                #    print(f"Debug: Storing incomplete transition for group '{group}' at time {time}")
                 incomplete_transitions[group][time] = group_data.clone().reshape(-1)
                 
             
@@ -443,7 +445,10 @@ def main():
 
                 
             if env.is_ready():
+                #print(f"incomplete_transitions before update {list(incomplete_transitions[group].keys())}")
                 ready_reward = env.get_ready_reward()
+                #print(f'incomplete transition before update: {incomplete_transitions[group].keys()}')
+
                 
                 #print(f'UPDATE INCOMPLETE TRANSITION {list(ready_reward.keys())}')
                 #print(ready_reward)
@@ -456,6 +461,8 @@ def main():
                     #print(complete_transition['next', group, 'done'].shape)
                     
                     #incomplete_transitions[group][time]['next']['agent']['reward'] = torch.tensor(list(reward.values())).reshape([1,4])
+                    #if time == 1100:
+                    #    print(f"Debug: Processing ready reward for group '{group}' at time {time}, reward: {reward}")
                     complete_transition = incomplete_transitions[group].pop(time)
                     reward_tensor = torch.tensor(np.array(list(reward.values())).reshape(1, n_agent, 1), dtype=torch.float32)
                     complete_transition.set(("next", group, "reward"), reward_tensor)
@@ -472,6 +479,7 @@ def main():
                     #print(incomplete_transitions)
                     
         synchronized_timer += frames_per_batch
+        #print(f'synchronized_timer: {synchronized_timer}')
 
         # --- OPTIMIZATION BLOCK ---
         for group in train_group_map.keys():
@@ -520,8 +528,7 @@ def main():
     df = pd.DataFrame(reward_check)
     df.to_csv(os.path.join(args.log_path,'check.csv'), index=False)
     
-    env.save_statistics(output_dir=args.log_path)  # Save logs at the end of training
-    
+    env.save_statistics(args.log_path)    
     # Create a list to hold the flattened rows
     flattened_data = []
 

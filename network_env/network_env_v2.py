@@ -171,6 +171,9 @@ class NetworkEnvV2(ParallelEnv):
         
         for res_id in slice_obj.idx_to_resource:
             self.recorders[agent].add_accumulated(res_id, accumulated_demands[res_id])
+        
+        for res_id in slice_obj.idx_to_resource:
+            self.recorders[agent].add_available_capacity(res_id, self.resources[res_id].available_capacity)
                     
         # Construct the features vector following a predictable indexing sequence
         obs_features = []
@@ -297,6 +300,9 @@ class NetworkEnvV2(ParallelEnv):
                     recorder.add_latency(task.arrival_time, end_to_end_latency)
                     recorder.add_energy(task.arrival_time, float(task.accumulated_energy))
                     #recorder.add_reward(reward_task)
+                    
+                    #if end_to_end_latency > 5.0:
+                    #    reward_task -= 1
 
                     
                     if TEST_MODE:
@@ -427,6 +433,10 @@ class Recorder():
         self.reward = {}
         self.rejection = {resource: [] for resource in self.idx_to_resource}
         self.accumulated = {resource: [] for resource in self.idx_to_resource}
+        self.available_capacity = {resource: [] for resource in self.idx_to_resource}
+    
+    def add_available_capacity(self, id, available_capacity):
+        self.available_capacity[id].append(available_capacity)
 
     def add_accumulated(self, id, accumulated):
         self.accumulated[id].append(accumulated)
@@ -454,9 +464,10 @@ class Recorder():
             if not os.path.exists(path):
                 os.makedirs(path, exist_ok=True)
             
-            reward = {'reward': [self.reward[i] for i in range(len(self.reward))]}
-            latency = {'latency': [self.latency[i] for i in range(len(self.latency))]}
-            energy = {'energy': [self.energy[i] for i in range(len(self.energy))]}
+            # Convert dictionaries to lists by extracting values (self.reward/latency/energy are dicts with t_prime as keys)
+            reward = {'reward': list(self.reward.values())}
+            latency = {'latency': list(self.latency.values())}
+            energy = {'energy': list(self.energy.values())}
             #print(f"[Recorder.save_result] reward={reward}")
             data_to_save = {
                 'action.csv': self.action,
@@ -476,8 +487,10 @@ class Recorder():
                     df.to_csv(full_path, index=False)
 
             logger.debug(f"[Recorder.save_result] saved recorder data to {path}")
+            print(f"[Recorder.save_result] Saved {len(self.reward)} rewards, {len(self.latency)} latencies, {len(self.energy)} energies to {path}")
         except Exception as e:
             logger.error(f"[Recorder.save_result] failed saving recorder data to {path}: {e}")
+            print(f"[Recorder.save_result] ERROR: Failed to save recorder data to {path}: {e}")
 
 
 class Resource():

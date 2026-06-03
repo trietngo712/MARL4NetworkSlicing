@@ -15,6 +15,10 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 TEST_MODE = False  # Set to True to enable test-specific logging behavior
+PENALTY_REWARD = -1  # Large negative reward for queue overflow
+MAX_QUEUE_LENGTH = 5  # Maximum allowed queue length before penalizing
+
+END_EPISODE = False  # Flag to signal episode termination on queue overflow
 
 class NetworkEnvV3(ParallelEnv):
     
@@ -50,6 +54,14 @@ class NetworkEnvV3(ParallelEnv):
         
         #logger.debug(f"[__init__] initialized: agents={self.agents}, current_time={self.current_time}, alpha={self.alpha}, beta={self.beta}")
         #logger.debug(f"[__init__] resources={list(self.resources.keys())}")
+        
+        self.demand = {}
+        for agent in self.agents:
+            if self.test_demand is not None:
+                self.demand[agent] = self.test_demand
+            else:
+                self.demand[agent] = pd.read_csv(os.path.join(self.traffic_path, f'{agent}_demand.csv'))
+
     
     def set_test_mode(self, test_mode=True):
         global TEST_MODE
@@ -100,8 +112,8 @@ class NetworkEnvV3(ParallelEnv):
             # torch.manual_seed(seed)
             
         # 2. Reset the clock to the initial discrete time slot
-        self.current_time = 0
-        logger.debug(f"[reset] current_time set to {self.current_time}")
+        #self.current_time = 0
+        #logger.debug(f"[reset] current_time set to {self.current_time}")
         
         # 3. Restore all physical resource capacities back to maximum capacity
         for res in self.resources.values():
@@ -113,21 +125,17 @@ class NetworkEnvV3(ParallelEnv):
             self.slices[agent].task_queue.clear()
         logger.debug(f"[reset] cleared task queues for all agents")
             
-        self._ready_rewards_ledger.clear()
-        logger.debug(f"[reset] cleared rewards ledger")
+        #self._ready_rewards_ledger.clear()
+        #logger.debug(f"[reset] cleared rewards ledger")
         
-        self.recorders = {agent: Recorder(self.slices[agent]) for agent in self.agents}
+        #self.recorders = {agent: Recorder(self.slices[agent]) for agent in self.agents}
         
-        self.demand = {}
-        for agent in self.agents:
-            if self.test_demand is not None:
-                self.demand[agent] = self.test_demand
-            else:
-                self.demand[agent] = pd.read_csv(os.path.join(self.traffic_path, f'{agent}_demand.csv'))
 
         
         # 5. Build and return initial observations and info mappings
-        observations = {agent: self._get_obs(agent) for agent in self.agents}
+        print(f'--- Reset {self.current_time} ---')
+
+        observations = {agent: self._get_obs(agent)[1] for agent in self.agents}
         infos = {agent: {} for agent in self.agents}
         
         return observations, infos
@@ -143,12 +151,14 @@ class NetworkEnvV3(ParallelEnv):
         """
         slice_obj = self.slices[agent]
         
+        QUEUE_OVERFLOW = False
+        
         # Initialize workload accumulation maps for all tracking resources in this slice
         accumulated_demands = {res_id: 0.0 for res_id in slice_obj.idx_to_resource}
         
         if self.test_demand is not None:
             new_task = Task(arrival_time=self.current_time, resource_demand={
-                res_id: self.test_demand
+                res_id: self.test_demand * self.resources[res_id].capacity
                 for res_id in slice_obj.idx_to_resource
             })
             
@@ -185,7 +195,13 @@ class NetworkEnvV3(ParallelEnv):
         
         logger.debug(f"[_get_obs] agent={agent}, obs_features={obs_features}")
         # Convert to a flat float32 array suitable for standard neural network ingestion
-        return np.array(obs_features, dtype=np.float32)
+        
+        for res_id in slice_obj.idx_to_resource:
+            if accumulated_demands[res_id] > MAX_QUEUE_LENGTH * self.resources[res_id].capacity:
+                QUEUE_OVERFLOW = True
+                logger.warning(f"[_get_obs] Queue overflow detected for agent={agent}, resource={res_id}, accumulated_demand={accumulated_demands[res_id]}, capacity={self.resources[res_id].capacity}")
+                
+        return QUEUE_OVERFLOW,np.array(obs_features, dtype=np.float32)
 
         
     def step(self, actions):
@@ -268,6 +284,7 @@ class NetworkEnvV3(ParallelEnv):
         # 4. Schedule and apply proportional energy
         for agent in self.agents:
             slice_obj = self.slices[agent]
+            recorder = self.recorders[agent]
             
             for res_id, allocated_amount in actual_allocations[agent].items():
                 self.scheduler.schedule(
@@ -311,20 +328,64 @@ class NetworkEnvV3(ParallelEnv):
             for task in completed_tasks:
                 slice_obj.task_queue.remove(task)
                 
-        self.current_time += 1
         logger.debug(f"[step] incremented current_time to {self.current_time}")
         
         if not TEST_MODE:
             rewards = {agent: 0.0 for agent in self.agents}
         
+        self.current_time += 1
+
+        observations = {}
+        overflow_detected = False
+        for agent in self.agents:
+            overflow, obs = self._get_obs(agent)
+            observations[agent] = obs
+            if overflow:
+                overflow_detected = True
+                logger.warning(f"[step] Queue overflow detected for agent={agent} at time={self.current_time}")
+        
+        if overflow_detected:
+            #rewards = {agent: PENALTY_REWARD for agent in self.agents}
+            
+            for agent in self.agents:
+                recorder = self.recorders[agent]
+                recorder.add_episode_end(self.current_time)
+            
+            
+            logger.warning(f"[step] Applying penalty reward={PENALTY_REWARD} to all agents due to queue overflow at time={self.current_time}")
+            terminations = {agent: True for agent in self.agents}
+            truncations = {agent: False for agent in self.agents}
+            infos = {agent: {'overflow': True} for agent in self.agents}
+            
+            #for time_step, rewards in self._ready_rewards_ledger.items():
+            #    if len(rewards) < len(self.agents):
+            #        for agent in self.agents:
+            #            if agent not in rewards:
+            #                self._ready_rewards_ledger[time_step][agent] = PENALTY_REWARD
+            
+            for agent in self.agents:
+                slice_obj = self.slices[agent]
+                for task in slice_obj.task_queue:
+                    t_prime = task.arrival_time
+                    if t_prime in self._ready_rewards_ledger and agent not in self._ready_rewards_ledger[t_prime] and t_prime < self.current_time:
+                        self._ready_rewards_ledger[t_prime][agent] = PENALTY_REWARD
+                    else:
+                        if t_prime not in self._ready_rewards_ledger and t_prime < self.current_time:
+                            self._ready_rewards_ledger[t_prime] = {}
+                            self._ready_rewards_ledger[t_prime][agent] = PENALTY_REWARD
+            
+            
+            return observations, rewards, terminations, truncations, infos
+        
         terminations = {agent: False for agent in self.agents}
         truncations = {agent: False for agent in self.agents}
         infos = {agent: {} for agent in self.agents}
         
+        
+        
         #logger.debug(f"[step] rewards={rewards}, terminations={terminations}")
 
-        observations = {agent: self._get_obs(agent) for agent in self.agents}
-        logger.debug(f"[step] observations computed, returning step results")
+        #logger.debug(f"[step] observations computed, returning step results")
         return observations, rewards, terminations, truncations, infos
     
     @functools.lru_cache(maxsize=None)
@@ -372,6 +433,7 @@ class NetworkEnvV3(ParallelEnv):
         for time_step, rewards in self._ready_rewards_ledger.items():
             if len(rewards) == len(self.agents):
                 return True
+        
         return False
 
     def get_ready_reward(self):
@@ -384,6 +446,10 @@ class NetworkEnvV3(ParallelEnv):
         """
         ready = {}
         completed_time_steps = []
+        
+        #print(f"[get_ready_reward] Checking rewards ledger at time={self.current_time}, ledger={self._ready_rewards_ledger.keys()}")
+        
+
         for time_step, rewards in self._ready_rewards_ledger.items():
             if len(rewards) == len(self.agents):
                 mean_reward = sum(rewards.values()) / len(rewards)
@@ -393,14 +459,20 @@ class NetworkEnvV3(ParallelEnv):
                 for agent, _ in rewards.items():
                     self.recorders[agent].add_reward(time_step, mean_reward)
                     #print(f"[get_ready_reward] Recorded mean reward for agent={agent}, time_step={time_step}, mean_reward={mean_reward}")
+        
+        
 
         for time_step in completed_time_steps:
             del self._ready_rewards_ledger[time_step]
-
+        #print(f'self.current_time: {self.current_time}')
+        
+        #print(f"[get_ready_reward] Returning ready rewards for time steps: {list(ready.keys())}")
+        #print(f"the reamining ledger time steps after flush: {list(self._ready_rewards_ledger.keys())}")
         return ready
 
     def save_statistics(self, output_dir=None):
         """Save collected statistics using per-slice Recorder objects."""
+        print("[save_statistics] Saving recorder statistics...")
         if output_dir is None:
             output_dir = self.log_path or '.'
         output_path = Path(output_dir)
@@ -424,6 +496,10 @@ class Recorder():
         self.reward = {}
         self.rejection = {resource: [] for resource in self.idx_to_resource}
         self.accumulated = {resource: [] for resource in self.idx_to_resource}
+        self.episode_end = []
+    
+    def add_episode_end(self, current_time):
+        self.episode_end.append(current_time)
 
     def add_accumulated(self, id, accumulated):
         self.accumulated[id].append(accumulated)
@@ -451,9 +527,12 @@ class Recorder():
             if not os.path.exists(path):
                 os.makedirs(path, exist_ok=True)
             
-            reward = {'reward': [self.reward[i] for i in range(len(self.reward))]}
-            latency = {'latency': [self.latency[i] for i in range(len(self.latency))]}
-            energy = {'energy': [self.energy[i] for i in range(len(self.energy))]}
+            # Convert dictionaries to lists by extracting values (self.reward/latency/energy are dicts with t_prime as keys)
+            reward = {'reward': list(self.reward.values())}
+            latency = {'latency': list(self.latency.values())}
+            energy = {'energy': list(self.energy.values())}
+            episode_end = {'episode_end': self.episode_end}
+            
             #print(f"[Recorder.save_result] reward={reward}")
             data_to_save = {
                 'action.csv': self.action,
@@ -462,7 +541,8 @@ class Recorder():
                 'energy.csv': energy,
                 'rejection.csv': self.rejection,
                 'reward.csv': reward,
-                'accumulated.csv': self.accumulated
+                'accumulated.csv': self.accumulated,
+                'episode_end.csv': episode_end
             }
 
             for filename, data in data_to_save.items():
@@ -473,8 +553,10 @@ class Recorder():
                     df.to_csv(full_path, index=False)
 
             logger.debug(f"[Recorder.save_result] saved recorder data to {path}")
+            print(f"[Recorder.save_result] Saved {len(self.reward)} rewards, {len(self.latency)} latencies, {len(self.energy)} energies to {path}")
         except Exception as e:
             logger.error(f"[Recorder.save_result] failed saving recorder data to {path}: {e}")
+            print(f"[Recorder.save_result] ERROR: Failed to save recorder data to {path}: {e}")
 
 
 class Resource():

@@ -7,8 +7,8 @@
         "cpu": 1.5,
         "bandwidth": 3.75 
     },
-    "transition_per_batch": 1000,
-    "n_iterations": 10,
+    "transition_per_batch": 100,
+    "n_iterations": 100,
     "min_replay_size":1000,
     "memory_size":100000,
     "n_optimizer_steps": 100,

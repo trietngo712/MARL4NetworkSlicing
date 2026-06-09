@@ -20,16 +20,31 @@ MAX_QUEUE_LENGTH = 5  # Maximum allowed queue length before penalizing
 
 END_EPISODE = False  # Flag to signal episode termination on queue overflow
 
-class NetworkEnvV3(ParallelEnv):
+class NetworkEnvV4(ParallelEnv):
     
-    def __init__(self, n_slices=1, resource_path=None, traffic_path=None, log_path=None,
-                 resource_scaling_factor=1.0, scheduler=None, test_demand=None):
+    def __init__(self,
+        n_slices=1, 
+        resource_path=None, 
+        traffic_path=None, 
+        log_path=None,
+        resource_scaling_factor=1.0, 
+        scheduler=None, 
+        test_demand=None,
+        max_queue_length=MAX_QUEUE_LENGTH,
+        penalty_reward=PENALTY_REWARD,
+        latency_preference=None,
+        energy_preference=None,
+        alpha = 1.0,
+        beta = 100.0):
+        
         self.n_slices = n_slices
         self.resource_scaling_factor = resource_scaling_factor
         self.scheduler = scheduler if scheduler is not None else FIFOScheduler()
         self.log_path = log_path
         self.traffic_path = traffic_path
         self.test_demand = test_demand
+        self.max_queue_length = max_queue_length
+        self.penalty_reward = penalty_reward
         
         # Configure logging with log_path
         self._setup_logging()
@@ -42,12 +57,14 @@ class NetworkEnvV3(ParallelEnv):
         self.possible_agents = self.agents[:]
         
         self.slices = {}
-        for agent in self.agents:
+        for i, agent in enumerate(self.agents):
             self.slices[agent] = Slice(slice_id=agent, resource=self.resources)
+            self.slices[agent].set_preferences(latency_preference[i] if latency_preference is not None else 0.5, energy_preference[i] if energy_preference is not None else 0.5)
+            
         
         self.current_time = 0
-        self.alpha = 1.0
-        self.beta = 100.0
+        self.alpha = alpha
+        self.beta = beta
         # Structure: { arrival_time_t_prime: { 'slice_0': reward_val, 'slice_1': reward_val } }
         self._ready_rewards_ledger = {}
         self.recorders = {agent: Recorder(self.slices[agent]) for agent in self.agents}
@@ -133,7 +150,7 @@ class NetworkEnvV3(ParallelEnv):
 
         
         # 5. Build and return initial observations and info mappings
-        print(f'--- Reset {self.current_time} ---')
+        #print(f'--- Reset {self.current_time} ---')
 
         observations = {agent: self._get_obs(agent)[1] for agent in self.agents}
         infos = {agent: {} for agent in self.agents}
@@ -197,7 +214,7 @@ class NetworkEnvV3(ParallelEnv):
         # Convert to a flat float32 array suitable for standard neural network ingestion
         
         for res_id in slice_obj.idx_to_resource:
-            if accumulated_demands[res_id] > MAX_QUEUE_LENGTH * self.resources[res_id].capacity:
+            if accumulated_demands[res_id] > self.max_queue_length * self.resources[res_id].capacity:
                 QUEUE_OVERFLOW = True
                 logger.warning(f"[_get_obs] Queue overflow detected for agent={agent}, resource={res_id}, accumulated_demand={accumulated_demands[res_id]}, capacity={self.resources[res_id].capacity}")
                 
@@ -365,14 +382,22 @@ class NetworkEnvV3(ParallelEnv):
             
             for agent in self.agents:
                 slice_obj = self.slices[agent]
+                recorder = self.recorders[agent]
+
                 for task in slice_obj.task_queue:
                     t_prime = task.arrival_time
+                    end_to_end_latency = self.current_time - task.arrival_time + 1
+                    if t_prime < self.current_time:
+                        recorder.add_latency(task.arrival_time, end_to_end_latency)
+                        recorder.add_energy(task.arrival_time, float(task.accumulated_energy))
+                    
+                    
                     if t_prime in self._ready_rewards_ledger and agent not in self._ready_rewards_ledger[t_prime] and t_prime < self.current_time:
-                        self._ready_rewards_ledger[t_prime][agent] = PENALTY_REWARD
+                        self._ready_rewards_ledger[t_prime][agent] = self.penalty_reward
                     else:
                         if t_prime not in self._ready_rewards_ledger and t_prime < self.current_time:
                             self._ready_rewards_ledger[t_prime] = {}
-                            self._ready_rewards_ledger[t_prime][agent] = PENALTY_REWARD
+                            self._ready_rewards_ledger[t_prime][agent] = self.penalty_reward
             
             
             return observations, rewards, terminations, truncations, infos
@@ -573,7 +598,7 @@ class Resource():
         if self.resource_type == 'link':
             return 0.0 
             
-        return max(43.4779 * np.log(100 * utilization) + 226.8324, 226.8324)
+        return 43.4779 * np.log(100 * utilization) + 226.8324 if np.log(100 * utilization) > 0 else 226.8324
 
     def allocate(self, amount):
         if amount <= self.available_capacity:
@@ -607,6 +632,11 @@ class Slice():
 
     def number_of_resources(self):
         return len(self.resource)
+    
+    def set_preferences(self, lambda_pref, rho_pref):
+        self.lambda_pref = lambda_pref
+        self.rho_pref = rho_pref
+        logger.debug(f"[Slice.set_preferences] slice_id={self.slice_id}, lambda_pref={lambda_pref}, rho_pref={rho_pref}")
 
     def add_task(self, task):
         self.task_queue.append(task)

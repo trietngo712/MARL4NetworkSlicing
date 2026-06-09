@@ -20,16 +20,31 @@ MAX_QUEUE_LENGTH = 5  # Maximum allowed queue length before penalizing
 
 END_EPISODE = False  # Flag to signal episode termination on queue overflow
 
-class NetworkEnvV3(ParallelEnv):
+class NetworkEnvV8(ParallelEnv):
     
-    def __init__(self, n_slices=1, resource_path=None, traffic_path=None, log_path=None,
-                 resource_scaling_factor=1.0, scheduler=None, test_demand=None):
+    def __init__(self,
+        n_slices=1, 
+        resource_path=None, 
+        traffic_path=None, 
+        log_path=None,
+        resource_scaling_factor=1.0, 
+        scheduler=None, 
+        test_demand=None,
+        max_queue_length=MAX_QUEUE_LENGTH,
+        penalty_reward=PENALTY_REWARD,
+        latency_preference=None,
+        energy_preference=None,
+        alpha = 1.0,
+        beta = 1000.0):
+        
         self.n_slices = n_slices
         self.resource_scaling_factor = resource_scaling_factor
         self.scheduler = scheduler if scheduler is not None else FIFOScheduler()
         self.log_path = log_path
         self.traffic_path = traffic_path
         self.test_demand = test_demand
+        self.max_queue_length = max_queue_length
+        self.penalty_reward = penalty_reward
         
         # Configure logging with log_path
         self._setup_logging()
@@ -42,15 +57,19 @@ class NetworkEnvV3(ParallelEnv):
         self.possible_agents = self.agents[:]
         
         self.slices = {}
-        for agent in self.agents:
+        for i, agent in enumerate(self.agents):
             self.slices[agent] = Slice(slice_id=agent, resource=self.resources)
+            self.slices[agent].set_preferences(latency_preference[i] if latency_preference is not None else 0.5, energy_preference[i] if energy_preference is not None else 0.5)
+            
         
         self.current_time = 0
-        self.alpha = 1.0
-        self.beta = 100.0
+        self.alpha = alpha
+        self.beta = beta
         # Structure: { arrival_time_t_prime: { 'slice_0': reward_val, 'slice_1': reward_val } }
         self._ready_rewards_ledger = {}
         self.recorders = {agent: Recorder(self.slices[agent]) for agent in self.agents}
+        
+        self.current_queue = {agent: {} for agent in self.agents}
         
         #logger.debug(f"[__init__] initialized: agents={self.agents}, current_time={self.current_time}, alpha={self.alpha}, beta={self.beta}")
         #logger.debug(f"[__init__] resources={list(self.resources.keys())}")
@@ -133,7 +152,10 @@ class NetworkEnvV3(ParallelEnv):
 
         
         # 5. Build and return initial observations and info mappings
-        print(f'--- Reset {self.current_time} ---')
+        #print(f'--- Reset {self.current_time} ---')
+        
+        #if self.current_time > 0:
+        #    self.current_time += 1
 
         observations = {agent: self._get_obs(agent)[1] for agent in self.agents}
         infos = {agent: {} for agent in self.agents}
@@ -158,13 +180,13 @@ class NetworkEnvV3(ParallelEnv):
         
         if self.test_demand is not None:
             new_task = Task(arrival_time=self.current_time, resource_demand={
-                res_id: self.test_demand * self.resources[res_id].capacity
+                res_id: (self.test_demand * self.resources[res_id].capacity) / len(self.agents)
                 for res_id in slice_obj.idx_to_resource
             })
             
         else:
             new_task = Task(arrival_time=self.current_time, resource_demand={
-                res_id: self.demand[agent].iloc[self.current_time][res_id]
+                res_id: self.demand[agent].iloc[self.current_time][res_id] / len(self.agents)
                 for res_id in slice_obj.idx_to_resource
             })
             
@@ -180,14 +202,22 @@ class NetworkEnvV3(ParallelEnv):
         
         for res_id in slice_obj.idx_to_resource:
             self.recorders[agent].add_accumulated(res_id, accumulated_demands[res_id])
-                    
+        
+        self.current_queue[agent] = {}
+
         # Construct the features vector following a predictable indexing sequence
         obs_features = []
         for res_id in slice_obj.idx_to_resource:
-            obs_features.append(accumulated_demands[res_id] / self.resources[res_id].capacity)  # Normalize backlog by capacity for better learning stability
+            m = accumulated_demands[res_id] / self.resources[res_id].capacity
+
+            obs_features.append(m)  # Normalize backlog by capacity for better learning stability
+            self.current_queue[agent][res_id] = m
+
         
         for res_id in slice_obj.idx_to_resource:
-            obs_features.append(float(self.resources[res_id].available_capacity) / self.resources[res_id].capacity)  # Normalize available capacity by maximum capacity
+            m = float(self.resources[res_id].available_capacity) / self.resources[res_id].capacity
+            obs_features.append(m)  # Normalize available capacity by maximum capacity
+        
         
         # Append the slice priority preferences (Equation 15 & 16 weights)
         obs_features.append(float(slice_obj.lambda_pref))  # Latency priority
@@ -197,7 +227,7 @@ class NetworkEnvV3(ParallelEnv):
         # Convert to a flat float32 array suitable for standard neural network ingestion
         
         for res_id in slice_obj.idx_to_resource:
-            if accumulated_demands[res_id] > MAX_QUEUE_LENGTH * self.resources[res_id].capacity:
+            if accumulated_demands[res_id] > self.max_queue_length * self.resources[res_id].capacity:
                 QUEUE_OVERFLOW = True
                 logger.warning(f"[_get_obs] Queue overflow detected for agent={agent}, resource={res_id}, accumulated_demand={accumulated_demands[res_id]}, capacity={self.resources[res_id].capacity}")
                 
@@ -206,6 +236,10 @@ class NetworkEnvV3(ParallelEnv):
         
     def step(self, actions):
         logger.debug(f"[step] current_time={self.current_time}, actions={actions}")
+        
+        queue_now = copy.deepcopy(self.current_queue)
+        systemic_energy = {agent: None for agent in self.agents}
+        systemic_latency = {agent: None for agent in self.agents}
         
         items = list(actions.items())
         random.shuffle(items)
@@ -221,7 +255,8 @@ class NetworkEnvV3(ParallelEnv):
         requested_allocations = {res_id: 0.0 for res_id in self.resources}
         agent_requests = {agent: {} for agent in self.agents}
         
-        for agent, action in actions.items():
+        for agent, action in items:
+            #print(agent)
             slice_obj = self.slices[agent]
             recorder = self.recorders[agent]
             
@@ -234,6 +269,7 @@ class NetworkEnvV3(ParallelEnv):
                 recorder.add_action(res_id, normalized_action)
                 
                 if req > resource.available_capacity:
+                    #print(f"I AM HERE {agent}")
                     adjusted_req = resource.available_capacity - 0.05 * resource.capacity
                     req = max(0.0, adjusted_req)
                 
@@ -281,6 +317,7 @@ class NetworkEnvV3(ParallelEnv):
         
         logger.debug(f"[step] resource_powers={resource_powers}")
 
+        
         # 4. Schedule and apply proportional energy
         for agent in self.agents:
             slice_obj = self.slices[agent]
@@ -295,6 +332,33 @@ class NetworkEnvV3(ParallelEnv):
                     server_power=resource_powers[res_id],
                     current_time=self.current_time
                 )
+            
+            systemic_energy[agent] = np.sum([resource_powers[res_id] * agent_requests[agent][res_id] / requested_allocations[res_id]   for res_id in slice_obj.idx_to_resource])
+            systemic_latency[agent] = 1 * len(slice_obj.task_queue)
+            
+            #alloc = actual_allocations[agent]
+            #current_q = self.current_queue[agent]
+            
+            #print(alloc)
+            #print(current_q)
+            
+            #diff = np.array([(alloc[res_id] / self.resources[res_id].capacity) - current_q[res_id] for res_id in slice_obj.idx_to_resource])
+            
+            #queue_now = np.array([current_q[res_id] for res_id in slice_obj.idx_to_resource])
+            
+            #queue_control = np.max(diff ** 2 - queue_now ** 2)
+
+            
+            #systemic_latency = len(slice_obj.task_queue)
+            
+            
+            #print(f'energy: {systemic_energy} - latency: {systemic_latency}')
+            
+            #lambda_i, rho_i = slice_obj.lambda_pref, slice_obj.rho_pref
+            
+            #rewards[agent] = (lambda_i *  (self.alpha / systemic_latency))  + (rho_i * (self.beta / systemic_energy)) - 10 * queue_control
+            #rewards[agent] = - (lambda_i *  ( systemic_latency / self.alpha))  - (rho_i * (systemic_energy / self.beta)) - queue_control
+            
                             
             # 5. Check for Completions & Rewards
             completed_tasks = []
@@ -330,8 +394,8 @@ class NetworkEnvV3(ParallelEnv):
                 
         logger.debug(f"[step] incremented current_time to {self.current_time}")
         
-        if not TEST_MODE:
-            rewards = {agent: 0.0 for agent in self.agents}
+        #if not TEST_MODE:
+        #    rewards = {agent: 0.0 for agent in self.agents}
         
         self.current_time += 1
 
@@ -344,9 +408,45 @@ class NetworkEnvV3(ParallelEnv):
                 overflow_detected = True
                 logger.warning(f"[step] Queue overflow detected for agent={agent} at time={self.current_time}")
         
+        queue_next = self.current_queue
+        
+        #rewards = {agent: 0.0 for agent in self.agents}
+        
+        r = []
+
+        for agent in self.agents:
+            energy = systemic_energy[agent]
+            latency = systemic_latency[agent]
+            
+            slice_obj = self.slices[agent]
+            lambda_i, rho_i = slice_obj.lambda_pref, slice_obj.rho_pref
+
+
+            
+            queue_t = np.array([queue_now[agent][res_id] for res_id in self.slices[agent].idx_to_resource])
+            queue_t_next = np.array([queue_next[agent][res_id] for res_id in self.slices[agent].idx_to_resource])
+            #print(queue_t)
+            #print(queue_t_next)
+            
+            queue_control =  np.max(queue_t_next ** 2 - queue_t **2)
+            #print(f'queue_control {queue_control}')
+            #rewards[agent] = - (lambda_i *  ( latency / self.alpha))  - (rho_i * (energy / self.beta)) - queue_control
+            #rewards[agent] = (lambda_i *  (self.alpha / latency))  + (rho_i * (self.beta / energy)) -   queue_control
+            value = (lambda_i *  (self.alpha / latency))  + (rho_i * (self.beta / energy)) -   queue_control
+            r.append(value)
+        print(r)
+        average_reward = np.mean(r)
+        
+        rewards = {agent: average_reward for agent in self.agents}
+        #rewards = {agent: x for x in r}
+
+
+
+            
+        
         if overflow_detected:
             #rewards = {agent: PENALTY_REWARD for agent in self.agents}
-            
+            print('OVERFLOW')
             for agent in self.agents:
                 recorder = self.recorders[agent]
                 recorder.add_episode_end(self.current_time)
@@ -365,17 +465,33 @@ class NetworkEnvV3(ParallelEnv):
             
             for agent in self.agents:
                 slice_obj = self.slices[agent]
+                recorder = self.recorders[agent]
+
                 for task in slice_obj.task_queue:
                     t_prime = task.arrival_time
+                    end_to_end_latency = self.current_time - task.arrival_time + 1
+                    if t_prime < self.current_time:
+                        recorder.add_latency(task.arrival_time, end_to_end_latency)
+                        recorder.add_energy(task.arrival_time, float(task.accumulated_energy))
+                    
+                    
                     if t_prime in self._ready_rewards_ledger and agent not in self._ready_rewards_ledger[t_prime] and t_prime < self.current_time:
-                        self._ready_rewards_ledger[t_prime][agent] = PENALTY_REWARD
+                        self._ready_rewards_ledger[t_prime][agent] = self.penalty_reward
                     else:
                         if t_prime not in self._ready_rewards_ledger and t_prime < self.current_time:
                             self._ready_rewards_ledger[t_prime] = {}
-                            self._ready_rewards_ledger[t_prime][agent] = PENALTY_REWARD
-            
+                            self._ready_rewards_ledger[t_prime][agent] = self.penalty_reward
+                
+                
+                rewards[agent] = rewards[agent] + self.penalty_reward 
+            print(f'time {self.current_time}- reward {rewards[agent]}')
+
             
             return observations, rewards, terminations, truncations, infos
+        
+            
+        if self.current_time % 1000 == 0:
+            truncations = {agent: True for agent in self.agents}
         
         terminations = {agent: False for agent in self.agents}
         truncations = {agent: False for agent in self.agents}
@@ -386,6 +502,8 @@ class NetworkEnvV3(ParallelEnv):
         #logger.debug(f"[step] rewards={rewards}, terminations={terminations}")
 
         #logger.debug(f"[step] observations computed, returning step results")
+        print(f'time {self.current_time}- reward {rewards[agent]}')
+
         return observations, rewards, terminations, truncations, infos
     
     @functools.lru_cache(maxsize=None)
@@ -573,7 +691,8 @@ class Resource():
         if self.resource_type == 'link':
             return 0.0 
             
-        return max(43.4779 * np.log(100 * utilization) + 226.8324, 226.8324)
+        return  226.8324 + 200 * utilization * utilization
+        #return 426 * utilization * utilization * utilization
 
     def allocate(self, amount):
         if amount <= self.available_capacity:
@@ -607,6 +726,11 @@ class Slice():
 
     def number_of_resources(self):
         return len(self.resource)
+    
+    def set_preferences(self, lambda_pref, rho_pref):
+        self.lambda_pref = lambda_pref
+        self.rho_pref = rho_pref
+        logger.debug(f"[Slice.set_preferences] slice_id={self.slice_id}, lambda_pref={lambda_pref}, rho_pref={rho_pref}")
 
     def add_task(self, task):
         self.task_queue.append(task)
@@ -670,6 +794,10 @@ class FIFOScheduler(BaseScheduler):
 class ProcessorSharingScheduler(BaseScheduler):
     def schedule(self, task_queue, res_id, allocated_amount, total_resource_allocation, server_power, current_time):
         active_tasks = [t for t in task_queue if t.resource_demand.get(res_id, 0) > 0]
+        resource_demand_of_tasks = [t.resource_demand.get(res_id) for t in active_tasks] 
+        
+        total = np.sum(resource_demand_of_tasks)
+        partial = [r / total for r in resource_demand_of_tasks]
         
         logger.debug(f"[ProcessorSharingScheduler.schedule] res_id={res_id}, allocated_amount={allocated_amount}, active_tasks={len(active_tasks)}, current_time={current_time}")
         
@@ -677,10 +805,11 @@ class ProcessorSharingScheduler(BaseScheduler):
             logger.debug(f"[ProcessorSharingScheduler.schedule] no active tasks or no allocation, returning")
             return
             
-        share = allocated_amount / len(active_tasks) # This is g_{imt'}(k) for each task
-        logger.debug(f"[ProcessorSharingScheduler.schedule] share per task={share}")
+        #share = allocated_amount / len(active_tasks) # This is g_{imt'}(k) for each task
+        #logger.debug(f"[ProcessorSharingScheduler.schedule] share per task={share}")
         
-        for task in active_tasks:
+        for i,task in enumerate(active_tasks):
+            share = allocated_amount * partial[i]
             deduction = min(task.resource_demand[res_id], share)
             task.resource_demand[res_id] -= deduction
             

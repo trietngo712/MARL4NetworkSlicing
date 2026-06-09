@@ -164,7 +164,7 @@ def main():
         resource_path=args.config_path_resource,
         traffic_path=args.traffic_path,
         log_path=args.log_path,
-        test_demand=0.5,
+        test_demand=0.7,
     )
     
     env = PettingZooWrapper(

@@ -7,9 +7,9 @@ import csv
 import pandas as pd
 import os
 
-NUM_STEPS = 500000
-NUM_AGENTS = 1
-SEED = 0
+NUM_STEPS = 1000
+NUM_AGENTS = 3
+SEED = 1
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -27,18 +27,18 @@ with open('experiments/experiment_1/configs/resource_config.json', 'r') as f:
     config = json.load(f)
 
 
-for t in range(NUM_STEPS):
+for t in range(NUM_STEPS + 1):
     for agent in agents:
         resource_demand = {}
         for item in config:
             if item['type'] == 'mec':
                 resource_id = item['type'] + '_' + str(item['id'])
-                #resource_demand[resource_id] = np.random.uniform(1, 2)
-                resource_demand[resource_id] = 1
+                resource_demand[resource_id] = np.random.uniform(0.3, 0.7) * 4
+                #resource_demand[resource_id] = 1
             elif item['type'] == 'link':
                 resource_id = item['type'] + '_' + str(item['id'])
-                #resource_demand[resource_id] = np.random.uniform(2.5, 5)
-                resource_demand[resource_id] = 1
+                resource_demand[resource_id] = np.random.uniform(0.3, 0.7) * 10
+                #resource_demand[resource_id] = 1
         
         demand[agent].append(resource_demand)
 

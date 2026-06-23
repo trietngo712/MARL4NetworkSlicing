@@ -601,7 +601,7 @@ class Resource():
         if self.resource_type == 'link':
             return 0.0 
             
-        return  226.8324 + 200 * utilization * utilization * utilization
+        return  226.8324 + 200 * utilization * utilization 
         #return 426 * utilization * utilization * utilization
 
     def allocate(self, amount):
@@ -727,7 +727,7 @@ class ProcessorSharingScheduler(BaseScheduler):
             
             # --- EXACT ENERGY CALCULATION (Eq 9 & 10) ---
             if total_resource_allocation > 0:
-                omega = deduction / total_resource_allocation
+                omega = share / total_resource_allocation
                 task.accumulated_energy += omega * server_power
                 logger.debug(f"[ProcessorSharingScheduler.schedule] omega={omega}, accumulated_energy={task.accumulated_energy}")
             

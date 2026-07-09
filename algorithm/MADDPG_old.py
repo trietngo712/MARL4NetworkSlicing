@@ -5,6 +5,7 @@ import copy
 import tempfile
 import numpy as np
 import pandas as pd
+from tensordict import nn
 import torch
 from pathlib import Path
 from tqdm import tqdm
@@ -78,6 +79,18 @@ class MADDPGTrainer:
         if environment is not None:
             self.env = PettingZooWrapper(env = environment, use_mask = True, categorical_actions=False, device = self.device)
             self.env = TransformedEnv(self.env, InitTracker())
+            
+            obs_key = ("slice", "observation")
+
+            # Instantiate the observation normalization transform
+            #obs_norm = ObservationNorm(
+            #    in_keys=[obs_key],
+            #    standard_normal=True,
+            #)
+            
+            #self.env.append_transform(obs_norm)
+            
+            #self.env.transform[1].init_stats(100)
         else:
             raise ValueError("Environment must be provided for MADDPGTrainer.")
     
@@ -105,7 +118,8 @@ class MADDPGTrainer:
                 device = self.device,
                 depth = self.actor_configs.get("depth", 2),
                 num_cells = self.actor_configs.get("num_cells", 64),
-                activation_class = self.actor_configs.get("activation_class", torch.nn.Tanh)
+                activation_class = self.actor_configs.get("activation_class", torch.nn.ReLU),
+                #norm_class=lambda: torch.nn.LayerNorm(normalized_shape=self.critic_configs.get("num_cells", 64))
                 
             )
             
@@ -139,38 +153,38 @@ class MADDPGTrainer:
                     spec = policy.spec.clone(),
                     annealing_num_steps = total_frames // 2,
                     action_key = (group, "action"),
-                    sigma = self.noise_sigma
+                    sigma = self.noise_sigma,
                 ).to(self.device)
             )
             
             exploration_policies[group] = exploration_policy
         
-        # CRITIC NETWORKS
-        cat_module = TensorDictModule(
-            lambda obs, action: torch.cat([obs, action], dim = -1), 
-            in_keys = [(group, "observation"), (group, "action")],
-            out_keys = [(group, "obs_action")]
-        )
-        critic_net = MultiAgentMLP(
-            n_agent_inputs = env.observation_spec[group, "observation"].shape[-1] + env.full_action_spec[group, "action"].shape[-1],
-            n_agent_outputs = 1,
-            n_agents = self.n_agent,
-            centralized = self.critic_configs.get("centralized_critic", True),
-            share_params = self.critic_configs.get("share_parameter", False),
-            device = self.device,
-            depth = self.critic_configs.get("depth", 2),
-            num_cells = self.critic_configs.get("num_cells", 64),
-            activation_class = self.critic_configs.get("activation_class", torch.nn.Tanh)
+            # CRITIC NETWORKS
+            cat_module = TensorDictModule(
+                lambda obs, action: torch.cat([obs, action], dim = -1), 
+                in_keys = [(group, "observation"), (group, "action")],
+                out_keys = [(group, "obs_action")]
+            )
+            critic_net = MultiAgentMLP(
+                n_agent_inputs = env.observation_spec[group, "observation"].shape[-1] + env.full_action_spec[group, "action"].shape[-1],
+                n_agent_outputs = 1,
+                n_agents = self.n_agent,
+                centralized = self.critic_configs.get("centralized_critic", True),
+                share_params = self.critic_configs.get("share_parameter", False),
+                device = self.device,
+                depth = self.critic_configs.get("depth", 2),
+                num_cells = self.critic_configs.get("num_cells", 64),
+                activation_class = self.critic_configs.get("activation_class", torch.nn.ReLU),
+                #norm_class=lambda: torch.nn.LayerNorm(normalized_shape=self.critic_configs.get("num_cells", 64))
+            )
+            critic_module = TensorDictModule(
+                module = critic_net,
+                in_keys = [(group, "obs_action")],
+                out_keys =[(group, "state_action_value")]
+            )
+                
+            critics[group] = TensorDictSequential(cat_module, critic_module)
             
-        )
-        critic_module = TensorDictModule(
-            module = critic_net,
-            in_keys = [(group, "obs_action")],
-            out_keys =[(group, "state_action_value")]
-        )
-            
-        critics[group] = TensorDictSequential(cat_module, critic_module)
-        
         # COLLECTOR
         
         agents_exploration_policy = TensorDictSequential(*exploration_policies.values())
@@ -297,6 +311,9 @@ class MADDPGTrainer:
                             loss = loss_vals[loss_name]
                             optimizer = optimizers[group][loss_name]
                             
+                            #if loss_name == 'loss_value':
+                            #    print(f'Critic loss : {loss.item()}')
+                            
                             loss.backward()
                             
                             torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]["params"], self.max_grad_norm)
@@ -410,7 +427,7 @@ class MADDPGTester:
                 device = self.device,
                 depth = self.actor_configs.get("depth", 2),
                 num_cells = self.actor_configs.get("num_cells", 64),
-                activation_class = self.actor_configs.get("activation_class", torch.nn.Tanh)
+                activation_class = self.actor_configs.get("activation_class", torch.nn.ReLU),
                 
             )
             

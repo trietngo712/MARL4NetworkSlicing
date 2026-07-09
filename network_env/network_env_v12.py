@@ -20,7 +20,7 @@ MAX_QUEUE_LENGTH = 5  # Maximum allowed queue length before penalizing
 
 END_EPISODE = False  # Flag to signal episode termination on queue overflow
 
-class NetworkEnvV11(ParallelEnv):
+class NetworkEnvV12(ParallelEnv):
     
     def __init__(self,
         n_slices=1, 
@@ -358,17 +358,17 @@ class NetworkEnvV11(ParallelEnv):
                 recorder.add_active_time(res_id, 1 - delta)
             
             
-            systemic_energy[agent] = np.mean([(426.8324 - resource_powers[res_id] * (agent_requests[agent][res_id] / total_actual_allocations[res_id]) ) / 200    for res_id, resource in self.resources.items() if 'mec' in res_id])
+            #systemic_energy[agent] = np.mean([(426.8324 - resource_powers[res_id] * (agent_requests[agent][res_id] / total_actual_allocations[res_id]) ) / 200    for res_id, resource in self.resources.items() if 'mec' in res_id])
             
             #x1 = np.array([( MAX_QUEUE_LENGTH  - self.current_queue[agent][res_id] ) / (MAX_QUEUE_LENGTH ) for res_id, resource in self.resources.items() if 'mec' in res_id])
             #x2 = np.array([( MAX_QUEUE_LENGTH  - self.current_queue[agent][res_id] ) / (MAX_QUEUE_LENGTH ) for res_id, resource in self.resources.items() if 'mec' not in res_id])
-            x3 = np.array([ (agent_requests[agent][res_id] / resource.capacity) for res_id, resource in self.resources.items() if 'mec' in res_id])
-            x4 = np.array([ (agent_requests[agent][res_id] / resource.capacity) for res_id, resource in self.resources.items() if 'mec' not in res_id])
+            #x3 = np.array([ (agent_requests[agent][res_id] / resource.capacity) for res_id, resource in self.resources.items() if 'mec' in res_id])
+            #x4 = np.array([ (agent_requests[agent][res_id] / resource.capacity) for res_id, resource in self.resources.items() if 'mec' not in res_id])
 
             #print(x1)
             #print(x2)
 
-            x = np.array([(MAX_QUEUE_LENGTH  - self.current_queue[agent][res_id]  ) / (MAX_QUEUE_LENGTH ) for res_id, resource in self.resources.items()])
+            #x = np.array([(MAX_QUEUE_LENGTH  - self.current_queue[agent][res_id]  ) / (MAX_QUEUE_LENGTH ) for res_id, resource in self.resources.items()])
             #x1 = np.array([ (agent_requests[agent][res_id] / resource.capacity)   for res_id, resource in self.resources.items() if 'mec' in res_id])
             #x2 = np.array([ (agent_requests[agent][res_id] / resource.capacity)   for res_id, resource in self.resources.items() if 'mec' not in res_id])
 
@@ -381,16 +381,16 @@ class NetworkEnvV11(ParallelEnv):
             #c2 = len(x2) / s
             #systemic_latency[agent] =   np.mean(x1) + np.mean(x2) + np.mean(x3)
             #systemic_latency[agent] =   len(x) / np.sum(1.0 / x) + np.mean(x3)
-            systemic_latency[agent] =np.min(x)  + np.mean(x3) 
+            #systemic_latency[agent] =np.min(x)  + np.mean(x3) 
             #print(f'X4 {min(x4)}')
             #print(f'X3 {np.mean(x3)}')
 
 
             #systemic_latency[agent] = np.mean(x) 
 
-            recorder.add_reward_component('queue_size', (np.min(x)) * slice_obj.lambda_pref * self.reward_scale)
-            recorder.add_reward_component('server_action', np.mean(x3) * slice_obj.lambda_pref * self.reward_scale)
-            recorder.add_reward_component('energy', systemic_energy[agent] * slice_obj.rho_pref * self.reward_scale)
+            #recorder.add_reward_component('queue_size', (np.min(x)) * slice_obj.lambda_pref * self.reward_scale)
+            #recorder.add_reward_component('server_action', np.mean(x3) * slice_obj.lambda_pref * self.reward_scale)
+            #recorder.add_reward_component('energy', systemic_energy[agent] * slice_obj.rho_pref * self.reward_scale)
 
             #alloc = actual_allocations[agent]
             #current_q = self.current_queue[agent]
@@ -447,6 +447,9 @@ class NetworkEnvV11(ParallelEnv):
             
             for task in completed_tasks:
                 slice_obj.task_queue.remove(task)
+            
+            systemic_latency[agent] = -len(slice_obj.task_queue)
+
                 
         logger.debug(f"[step] incremented current_time to {self.current_time}")
         
@@ -520,7 +523,7 @@ class NetworkEnvV11(ParallelEnv):
                     agent_e.append((426.8324 - e[res_id] * coeff) / 200)
                     record_energy.append(e[res_id] * coeff)
             
-            #systemic_energy[agent] = np.mean(agent_e)
+            systemic_energy[agent] = np.mean(agent_e)
             
             recorder.add_energy(np.sum(record_energy))
         
@@ -564,7 +567,9 @@ class NetworkEnvV11(ParallelEnv):
             
             
             value = (lambda_i *  latency)  + (rho_i * energy) +  self.stable*queue_control
-            print(f'latency: {lambda_i *  latency} - energy: {rho_i * energy} - queue_control : {queue_control} - action_contrl : {action_control}')
+            print(f'latency: {lambda_i *  latency} - energy: {rho_i * energy} - queue_control : {queue_control} - action_control : {action_control}')
+            recorder.add_reward_component('latency', lambda_i *  latency * self.reward_scale)
+            recorder.add_reward_component('energy', rho_i * energy * self.reward_scale)
             r.append(self.reward_scale * value)
         #print(r)
         average_reward = np.mean(r)
@@ -761,7 +766,7 @@ class Recorder():
         self.real_reward = []
         self.overflow = []
         self.active_time = {resource: [] for resource in self.idx_to_resource}
-        self.reward_components = {'queue_size': [], 'server_action': [], 'energy': [], 'stable': [], 'penalty': []}
+        self.reward_components = {'latency': [], 'energy': [], 'stable': [], 'penalty': []}
     
     def add_reward_component(self, component_name, value):
         if component_name in self.reward_components:

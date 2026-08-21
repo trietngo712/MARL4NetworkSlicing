@@ -16,7 +16,7 @@ from torch import multiprocessing
 
 from torchrl.data import LazyMemmapStorage, RandomSampler, ReplayBuffer
 from torchrl.collectors import Collector
-from torchrl.envs import ExplorationType, InitTracker, ObservationNorm, PettingZooEnv, TransformedEnv, PettingZooWrapper, set_exploration_type
+from torchrl.envs import ExplorationType, InitTracker, ObservationNorm, PettingZooEnv, Transform, TransformedEnv, PettingZooWrapper, set_exploration_type
 from torchrl.modules import MultiAgentMLP, ProbabilisticActor, TanhDelta, OrnsteinUhlenbeckProcessModule
 from torchrl.objectives import DDPGLoss, SoftUpdate, ValueEstimators
 
@@ -26,7 +26,7 @@ sys.path.append(root_path)
 
 from network_env.network_env_v4 import NetworkEnvV4
 
-class MADDPGTrainer:
+class SafeMADDPGTrainer:
     
     def __init__(
         self,
@@ -132,18 +132,40 @@ class MADDPGTrainer:
             
             policy_modules[group] = policy_module
             
-            policy = ProbabilisticActor(
-                module = policy_modules[group],
-                spec = env.full_action_spec[group, "action"],
-                in_keys = [(group, "param")],
-                out_keys = [(group, "action")],
-                distribution_class = TanhDelta,
-                distribution_kwargs = {
-                    "low": env.full_action_spec_unbatched[group, "action"].space.low,
-                    "high": env.full_action_spec_unbatched[group, "action"].space.high
-                },
-                return_log_prob = False
-            )
+            policy = TensorDictSequential(
+                        ProbabilisticActor(
+                            module=policy_modules[group],
+                            spec=env.full_action_spec[group,"action"],
+                            in_keys=[(group,"param")],
+                            out_keys=[(group,"action_raw")],
+                            distribution_class=TanhDelta,
+                            distribution_kwargs={
+                                "low": env.full_action_spec_unbatched[group, "action"].space.low,
+                                "high": env.full_action_spec_unbatched[group, "action"].space.high
+                            },
+                            return_log_prob = False
+                        ),
+
+                        TensorDictModule(
+                            ActionProjectionModule(),
+                            in_keys=[(group,"action_raw")],
+                            out_keys=[(group,"action")]
+                        )
+                    )
+            policy.spec = env.full_action_spec[group,"action"]
+            
+            #policy = ProbabilisticActor(
+            #    module = policy_modules[group],
+            #    spec = env.full_action_spec[group, "action"],
+            #    in_keys = [(group, "param")],
+            #    out_keys = [(group, "action")],
+            #    distribution_class = TanhDelta,
+            #    distribution_kwargs = {
+            #        "low": env.full_action_spec_unbatched[group, "action"].space.low,
+            #        "high": env.full_action_spec_unbatched[group, "action"].space.high
+            #    },
+            #    return_log_prob = False
+            #)
             
             policies[group] = policy 
             
@@ -276,31 +298,7 @@ class MADDPGTrainer:
                 rewards = batch.get(("next",group ,"reward"))
                 mean_reward = rewards.mean().item()
                 iteration_rewards[group].append(mean_reward)
-            if env.is_ready():
-                ready_reward = env.get_ready_reward()
-            #for idx, time in enumerate(range(synchronized_timer, synchronized_timer + self.frames_per_batch)):
-            #    single_step_td = batch[idx]
-            #    for group in train_group_map.keys():
-            #        group_data = single_step_td.exclude(*[key for _group in env.group_map.keys() if _group != group for key in [_group, ("next",group)]])
-            #        incomplete_transitions[group][time] = group_data.clone().reshape(-1)
             
-            #for group in train_group_map.keys():
-            #    if env.is_ready():
-            #        ready_reward = env.get_ready_reward()
-            #        for time, reward in sorted(ready_reward.items()):
-            #            if time in incomplete_transitions[group]:
-            #                complete_transition = incomplete_transitions[group].pop(time)
-            #                reward_tensor = torch.tensor(np.array(list(reward.values())).reshape(1, self.n_agent, 1), dtype = torch.float32)
-            #                complete_transition.set(("next", group, "reward"), reward_tensor)
-            #                
-            #                replay_buffers[group].extend(complete_transition)
-            #                iteration_rewards[group].append(reward_tensor.mean().item())
-            
-            #synchronized_timer += self.frames_per_batch
-            
-            #Optimization
-            
-            for group in train_group_map.keys():
                 if len(replay_buffers[group]) >= self.min_replay_size:
                     #torch.autograd.set_detect_anomaly(True)
                     #print("OPTIMIZATION")
@@ -356,7 +354,7 @@ class MADDPGTrainer:
             
                            
                     
-class MADDPGTester:
+class SafeMADDPGTester:
     
     def __init__(
         self,
@@ -441,18 +439,41 @@ class MADDPGTester:
             
             policy_modules[group] = policy_module
             
-            policy = ProbabilisticActor(
-                module = policy_modules[group],
-                spec = env.full_action_spec[group, "action"],
-                in_keys = [(group, "param")],
-                out_keys = [(group, "action")],
-                distribution_class = TanhDelta,
-                distribution_kwargs = {
-                    "low": env.full_action_spec_unbatched[group, "action"].space.low,
-                    "high": env.full_action_spec_unbatched[group, "action"].space.high
-                },
-                return_log_prob = False
-            )
+            policy = TensorDictSequential(
+                        ProbabilisticActor(
+                            module=policy_modules[group],
+                            spec=env.full_action_spec[group,"action"],
+                            in_keys=[(group,"param")],
+                            out_keys=[(group,"action_raw")],
+                            distribution_class=TanhDelta,
+                            distribution_kwargs={
+                                "low": env.full_action_spec_unbatched[group, "action"].space.low,
+                                "high": env.full_action_spec_unbatched[group, "action"].space.high
+                            },
+                            return_log_prob = False
+                        ),
+
+                        TensorDictModule(
+                            ActionProjectionModule(),
+                            in_keys=[(group,"action_raw")],
+                            out_keys=[(group,"action")]
+                        )
+                    )
+            policy.spec = env.full_action_spec[group,"action"]
+
+            
+            #policy = ProbabilisticActor(
+            #    module = policy_modules[group],
+            #    spec = env.full_action_spec[group, "action"],
+            #    in_keys = [(group, "param")],
+            #    out_keys = [(group, "action")],
+            #    distribution_class = TanhDelta,
+            #   distribution_kwargs = {
+            #        "low": env.full_action_spec_unbatched[group, "action"].space.low,
+            #        "high": env.full_action_spec_unbatched[group, "action"].space.high
+            #    },
+            #    return_log_prob = False
+            #)
             
             
             # Load the Saved Checkpoint
@@ -509,8 +530,77 @@ def process_batch(batch: TensorDictBase, group_map) -> TensorDictBase:
         nested_terminated_key = ("next", group, "terminated")
         
         if nested_done_key not in keys:
-            batch.set(nested_done_key, batch.get(("done", group))).unsqueeze(-1).expand(1, group_shape[0])
+            batch.set(nested_done_key, batch.get(("next", "done"))).unsqueeze(-1).expand(*group_shape, 1)
         if nested_terminated_key not in keys:
-            batch.set(nested_terminated_key, batch.get(("terminated", group))).unsqueeze(-1).expand(1, group_shape[0])
-    
+            batch.set(nested_terminated_key, batch.get(("next", "terminated"))).unsqueeze(-1).expand(*group_shape, 1)
+
     return batch
+
+
+
+class BoundedOrthogonalProjection(torch.nn.Module):
+    def __init__(self, in_keys_inv=None, out_keys_inv=None, threshold=-0.575 / 0.475, inequality=True, num_iters=15):
+        if in_keys_inv is None:
+            in_keys_inv = [("slice", "action")]
+        if out_keys_inv is None:
+            out_keys_inv = in_keys_inv
+        
+        super().__init__()
+            
+        self.threshold = threshold
+        self.inequality = inequality
+        self.num_iters = num_iters
+
+    def forward(self, action: torch.Tensor) -> torch.Tensor:
+        # Expected input shape: [n_agents, action_dim] (or any shape with arbitrary leading batch dims)
+        
+        # 1. Establish search brackets of shape [1, action_dim]
+        # max across n_agents (dim=-2) keeps dimensions -> shape: [1, action_dim]
+        high = action.max(dim=-2, keepdim=True).values + 1.0
+        
+        if self.inequality:
+            # Match high's shape exactly: [1, action_dim]
+            low = torch.zeros_like(high)
+            
+            # Check if initial clamped actions already satisfy sum <= threshold
+            initial_sum = torch.clamp(action, -1.0, 1.0).sum(dim=-2, keepdim=True)
+            already_valid = initial_sum <= self.threshold
+            
+            # If valid, set high = 0 so final lambda remains exactly 0
+            high = torch.where(already_valid, low, high)
+        else:
+            low = action.min(dim=-2, keepdim=True).values - 1.0
+
+        # 2. Vectorized Bisection Loop
+        for _ in range(self.num_iters):
+            mid = (low + high) / 2.0  # Shape: [1, action_dim]
+            
+            # [n_agents, action_dim] - [1, action_dim] broadcasts cleanly
+            projected = torch.clamp(action - mid, min=-1.0, max=1.0)
+            
+            # Sum across n_agents -> Shape: [1, action_dim]
+            current_sum = projected.sum(dim=-2, keepdim=True)
+            
+            mask = current_sum > self.threshold
+            low = torch.where(mask, mid, low)
+            high = torch.where(mask, high, mid)
+            
+        # 3. Final projection
+        final_lambda = (low + high) / 2.0
+        #print(f"Final lambda: {final_lambda}")
+        return torch.clamp(action - final_lambda, min=-1.0, max=1.0)
+
+
+class ActionProjectionModule(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.projector = BoundedOrthogonalProjection(
+            threshold=-0.575 / 0.475,
+            inequality=True,
+            num_iters=15
+        )
+
+    def forward(self, action):
+        return self.projector.forward(action)
+    

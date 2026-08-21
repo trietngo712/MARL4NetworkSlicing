@@ -21,7 +21,7 @@ MAX_QUEUE_LENGTH = 5  # Maximum allowed queue length before penalizing
 
 END_EPISODE = False  # Flag to signal episode termination on queue overflow
 
-class NetworkEnvV13(ParallelEnv):
+class NetworkEnvV14(ParallelEnv):
     
     def __init__(self,
         n_slices=1, 
@@ -41,7 +41,8 @@ class NetworkEnvV13(ParallelEnv):
         max_steps=1000,
         stable = 1,
         reward_scale = 1.0,
-        seed = 0):
+        seed = 0,
+        safe = False):
         
         self.n_slices = n_slices
         self.resource_scaling_factor = resource_scaling_factor
@@ -55,7 +56,8 @@ class NetworkEnvV13(ParallelEnv):
         self.max_steps = max_steps
         self.stable = stable
         self.reward_scale = reward_scale
-        
+        self.safe = safe
+
         # Configure logging with log_path
         self._setup_logging()
         
@@ -262,6 +264,11 @@ class NetworkEnvV13(ParallelEnv):
 
         
     def step(self, actions):
+        
+        
+        if self.safe:
+            actions = self.BoundedOrthogonalProjection(actions)
+            
         logger.debug(f"[step] current_time={self.current_time}, actions={actions}")
         
         self.previous_action = self.current_action
@@ -810,6 +817,257 @@ class NetworkEnvV13(ParallelEnv):
             recorder.save_result(str(output_path / agent))
 
         logger.info(f"[save_statistics] recorder statistics saved to {output_path}")
+        
+    def _project_resource_bisection(
+        self,
+        x,
+        lower_bound=0.05,
+        upper_bound=1.0,
+        capacity=1.0,
+        tol=1e-10,
+        max_iter=15,
+    ):
+        """
+        Euclidean projection of x onto
+
+            lower_bound <= z_i <= upper_bound
+            sum_i z_i <= capacity
+
+        using bisection on the KKT multiplier.
+
+        Problem:
+
+            minimize_z  0.5 * ||z - x||_2^2
+
+            subject to
+                lower_bound <= z_i <= upper_bound
+                sum_i z_i <= capacity
+
+        KKT solution:
+
+            z_i(lambda) =
+                clip(x_i - lambda,
+                    lower_bound,
+                    upper_bound)
+
+        where lambda >= 0 is chosen such that
+
+            sum_i z_i(lambda) = capacity
+
+        whenever the capacity constraint is violated.
+        """
+
+        x = np.asarray(x, dtype=np.float64)
+
+        # First enforce individual bounds.
+        x = np.clip(
+            x,
+            lower_bound,
+            upper_bound,
+        )
+
+        # If already feasible, this is already the Euclidean projection.
+        if np.sum(x) <= capacity + tol:
+            return x
+
+        n = len(x)
+
+        # Feasibility check.
+        minimum_sum = n * lower_bound
+
+        if minimum_sum > capacity + tol:
+            raise ValueError(
+                "Projection problem is infeasible: "
+                f"{n} agents × lower_bound={minimum_sum:.6f} "
+                f"> capacity={capacity:.6f}."
+            )
+
+        # We need lambda such that:
+        #
+        # sum_i clip(x_i - lambda, lower, upper) = capacity
+        #
+        # The function is monotonically decreasing in lambda.
+        #
+        # A safe lower bound is 0.
+        lambda_low = 0.0
+
+        # A safe upper bound is max(x) - lower_bound.
+        lambda_high = np.max(x) - lower_bound
+
+        for _ in range(max_iter):
+
+            lambda_mid = 0.5 * (
+                lambda_low + lambda_high
+            )
+
+            z = np.clip(
+                x - lambda_mid,
+                lower_bound,
+                upper_bound,
+            )
+
+            total = np.sum(z)
+
+            if abs(total - capacity) <= tol:
+                return z
+
+            if total > capacity:
+                # Need a larger lambda to reduce z.
+                lambda_low = lambda_mid
+            else:
+                # Need a smaller lambda.
+                lambda_high = lambda_mid
+
+        # Final solution after bisection.
+        lambda_star = 0.5 * (
+            lambda_low + lambda_high
+        )
+
+        z = np.clip(
+            x - lambda_star,
+            lower_bound,
+            upper_bound,
+        )
+
+        return z
+
+
+    def BoundedOrthogonalProjection(
+        self,
+        actions,
+        lower_bound=0.05,
+        upper_bound=1.0,
+        tol=1e-10,
+        max_iter=15,
+    ):
+        """
+        Project the joint multi-agent action onto the feasible
+        resource-allocation set.
+
+        Input:
+            actions:
+                {
+                    agent_0: np.ndarray(shape=(n_resources,)),
+                    agent_1: np.ndarray(shape=(n_resources,)),
+                    ...
+                }
+
+            Actions are assumed to be in [-1, 1].
+
+        Output:
+            projected_actions:
+                Same dictionary structure, with projected actions
+                still in [-1, 1].
+
+        Normalized action:
+
+            x = 0.475 * a + 0.525
+
+        Constraints:
+
+            0.05 <= x_im <= 1
+            sum_i x_im <= 1
+        """
+
+        agents = list(self.agents)
+
+        if len(agents) == 0:
+            return actions
+
+        # ---------------------------------------------------------
+        # Convert dictionary -> matrix
+        #
+        # A[i, m] = action of agent i for resource m
+        # ---------------------------------------------------------
+
+        A = np.stack(
+            [
+                np.asarray(actions[agent], dtype=np.float64)
+                for agent in agents
+            ],
+            axis=0,
+        )
+
+        # ---------------------------------------------------------
+        # Safety: actor output should be in [-1, 1]
+        # ---------------------------------------------------------
+
+        A = np.clip(
+            A,
+            -1.0,
+            1.0,
+        )
+
+        # ---------------------------------------------------------
+        # Convert actor action to normalized allocation
+        #
+        # a in [-1,1]
+        #
+        # x = 0.475*a + 0.525
+        #
+        # x in [0.05,1]
+        # ---------------------------------------------------------
+
+        X = (
+            0.475 * A
+            + 0.525
+        )
+
+        # ---------------------------------------------------------
+        # Project each resource independently.
+        #
+        # For every resource m:
+        #
+        #       sum_i X[i,m] <= 1
+        #
+        # ---------------------------------------------------------
+
+        X_projected = np.empty_like(X)
+
+        n_resources = X.shape[1]
+
+        for m in range(n_resources):
+
+            X_projected[:, m] = (
+                self._project_resource_bisection(
+                    X[:, m],
+                    lower_bound=lower_bound,
+                    upper_bound=upper_bound,
+                    capacity=1.0,
+                    tol=tol,
+                    max_iter=max_iter,
+                )
+            )
+
+        # ---------------------------------------------------------
+        # Convert normalized allocation back to actor action space
+        #
+        # x = 0.475*a + 0.525
+        #
+        # a = (x - 0.525) / 0.475
+        # ---------------------------------------------------------
+
+        A_projected = (
+            X_projected - 0.525
+        ) / 0.475
+
+        # Numerical safety.
+        A_projected = np.clip(
+            A_projected,
+            -1.0,
+            1.0,
+        )
+
+        # ---------------------------------------------------------
+        # Convert matrix -> dictionary
+        # ---------------------------------------------------------
+
+        projected_actions = {
+            agent: A_projected[i].astype(np.float32)
+            for i, agent in enumerate(agents)
+        }
+
+        return projected_actions
 
 
 class Recorder():
@@ -1106,3 +1364,4 @@ class FairShareScheduler(BaseScheduler):
             delta = 0
         
         return self.schedule(task_queue, res_id, allocated_amount, total_resource_allocation, server_power, current_time, delta, recursive_depth + 1)
+

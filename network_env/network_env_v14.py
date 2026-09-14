@@ -42,7 +42,8 @@ class NetworkEnvV14(ParallelEnv):
         stable = 1,
         reward_scale = 1.0,
         seed = 0,
-        safe = False):
+        safe = False,
+        min_resource_allocation=0.05,):
         
         self.n_slices = n_slices
         self.resource_scaling_factor = resource_scaling_factor
@@ -57,6 +58,7 @@ class NetworkEnvV14(ParallelEnv):
         self.stable = stable
         self.reward_scale = reward_scale
         self.safe = safe
+        self.min_resource_allocation = min_resource_allocation
 
         # Configure logging with log_path
         self._setup_logging()
@@ -95,6 +97,9 @@ class NetworkEnvV14(ParallelEnv):
                 self.demand[agent] = self.test_demand
             elif self.traffic_path is not None:
                 self.demand[agent] = pd.read_csv(os.path.join(self.traffic_path, f'{agent}_demand.csv'))
+        
+        if self.uniform_demand is not None:
+            self.std_demand = {agent: (self.uniform_demand[agent]['high'] - self.uniform_demand[agent]['low']) / np.sqrt(12) for agent in self.agents}      
         
         self.period_t = 0
         random.seed(seed)
@@ -238,13 +243,13 @@ class NetworkEnvV14(ParallelEnv):
         # Construct the features vector following a predictable indexing sequence
         obs_features = []
         for res_id in slice_obj.idx_to_resource:
-            m = accumulated_demands[res_id] / self.resources[res_id].capacity
+            m = (accumulated_demands[res_id] / (self.resources[res_id].capacity ))# Normalize backlog by capacity and standard deviation for better learning stability
 
             obs_features.append(m)  # Normalize backlog by capacity for better learning stability
             self.current_queue[agent][res_id] = m
 
         for res_id in slice_obj.idx_to_resource:
-            m = float(self.resources[res_id].available_capacity) / self.resources[res_id].capacity
+            m = (float(self.resources[res_id].available_capacity) / (self.resources[res_id].capacity )) # Normalize available capacity by maximum capacity
             obs_features.append(m)  # Normalize available capacity by maximum capacity
         
         
@@ -267,7 +272,11 @@ class NetworkEnvV14(ParallelEnv):
         
         
         if self.safe:
+            #print("Before BoundedOrthogonalProjection:")
+            #print(actions)
             actions = self.BoundedOrthogonalProjection(actions)
+            #print("After BoundedOrthogonalProjection:")
+            #print(actions)
             
         logger.debug(f"[step] current_time={self.current_time}, actions={actions}")
         
@@ -305,7 +314,7 @@ class NetworkEnvV14(ParallelEnv):
                 resource = self.resources[res_id]
                 #normalized_action = (action[idx] + 1.0) / 2.0 
                 #normalized_action = 0.3 * action[idx] + 0.7
-                normalized_action = action[idx]*0.475 + 0.525
+                normalized_action = action[idx]*(1 - (self.min_resource_allocation + 1) / 2.0) + (1 + self.min_resource_allocation) / 2.0
                 #print(f'action: {normalized_action}')
                 
                 self.current_action.append(normalized_action)
@@ -492,7 +501,7 @@ class NetworkEnvV14(ParallelEnv):
             
             #systemic_latency[agent] = -len(slice_obj.task_queue) - collective_time_spent_in_a_time_step[agent]
             #systemic_latency[agent] = 1 / (len(slice_obj.task_queue) + collective_time_spent_in_a_time_step[agent])
-            systemic_latency[agent] = 1 - np.log(len(slice_obj.task_queue) + collective_time_spent_in_a_time_step[agent])
+            systemic_latency[agent] =  - np.log(len(slice_obj.task_queue) + collective_time_spent_in_a_time_step[agent])
 
 
 
@@ -635,7 +644,7 @@ class NetworkEnvV14(ParallelEnv):
                 action_control =  np.sqrt(np.mean(diff**2))
             
             
-            value = (lambda_i *  latency)  + (rho_i * energy) +  self.stable*queue_control
+            value =1 + (lambda_i *  latency)  + (rho_i * energy) +  self.stable*queue_control
             print(f'latency: {lambda_i *  latency} - energy: {rho_i * energy} - queue_control : {queue_control} - action_control : {action_control}')
             recorder.add_reward_component('latency', lambda_i *  latency * self.reward_scale)
             recorder.add_reward_component('energy', rho_i * energy * self.reward_scale)
@@ -856,6 +865,7 @@ class NetworkEnvV14(ParallelEnv):
 
         whenever the capacity constraint is violated.
         """
+        lower_bound = self.min_resource_allocation
 
         x = np.asarray(x, dtype=np.float64)
 
@@ -935,7 +945,7 @@ class NetworkEnvV14(ParallelEnv):
     def BoundedOrthogonalProjection(
         self,
         actions,
-        lower_bound=0.05,
+        lower_bound=None,
         upper_bound=1.0,
         tol=1e-10,
         max_iter=15,
@@ -968,6 +978,8 @@ class NetworkEnvV14(ParallelEnv):
             0.05 <= x_im <= 1
             sum_i x_im <= 1
         """
+        
+        lower_bound = self.min_resource_allocation
 
         agents = list(self.agents)
 
@@ -1009,8 +1021,8 @@ class NetworkEnvV14(ParallelEnv):
         # ---------------------------------------------------------
 
         X = (
-            0.475 * A
-            + 0.525
+            (1 - (self.min_resource_allocation + 1) / 2.0) * A
+            + (1 + self.min_resource_allocation) / 2.0
         )
 
         # ---------------------------------------------------------
@@ -1048,8 +1060,8 @@ class NetworkEnvV14(ParallelEnv):
         # ---------------------------------------------------------
 
         A_projected = (
-            X_projected - 0.525
-        ) / 0.475
+            X_projected - (1 + self.min_resource_allocation) / 2.0
+        ) / (1 - (self.min_resource_allocation + 1) / 2.0)
 
         # Numerical safety.
         A_projected = np.clip(

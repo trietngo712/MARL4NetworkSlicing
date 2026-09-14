@@ -18,7 +18,7 @@ from torchrl.data import LazyMemmapStorage, RandomSampler, ReplayBuffer
 from torchrl.collectors import Collector
 from torchrl.envs import ExplorationType, InitTracker, ObservationNorm, PettingZooEnv, TransformedEnv, PettingZooWrapper, set_exploration_type
 from torchrl.modules import MultiAgentMLP, ProbabilisticActor, TanhDelta, OrnsteinUhlenbeckProcessModule
-from torchrl.objectives import DDPGLoss, SoftUpdate, ValueEstimators
+from torchrl.objectives import DDPGLoss, SoftUpdate, ValueEstimators, TD3Loss
 
 import sys 
 root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -224,8 +224,12 @@ class MADDPGTrainer:
                 actor_network = policies[group],
                 value_network = critics[group],
                 delay_value = True,
-                loss_function = "l2"
+                loss_function = "l2",
             )
+            
+ 
+            
+            
             loss_module.set_keys(
                 state_action_value = (group, "state_action_value"),
                 reward = (group, "reward"),
@@ -243,7 +247,7 @@ class MADDPGTrainer:
         optimizers = {
             group:{
                 "loss_actor": torch.optim.Adam(loss.actor_network.parameters(), lr = self.actor_lr),
-                "loss_value": torch.optim.Adam(loss.value_network.parameters(), lr = self.critic_lr)
+                "loss_value": torch.optim.Adam(loss.value_network.parameters(), lr = self.critic_lr, weight_decay = 1e-4)
             } for group, loss in losses.items()
         }
         
